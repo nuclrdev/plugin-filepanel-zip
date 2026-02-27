@@ -1,0 +1,16 @@
+{
+	"schemaVersion": 1,
+	"name": "ZIP Archive Panel",
+	"id": "dev.nuclr.plugin.core.mount.zip",
+	"version": "1.0.0",
+	"description": "Allows browsing ZIP, JAR, WAR and EAR archives in the file panel.",
+	"author": "Nuclr Development Team",
+	"license": "Apache-2.0",
+	"website": "https://nuclr.dev",
+	"pageUrl": "https://nuclr.dev/plugins/core/filepanel-zip.html",
+	"docUrl": "https://nuclr.dev/plugins/core/filepanel-zip.html",
+	"type": "Official",
+	"archiveMountProviders": [
+		"dev.nuclr.plugin.core.mount.zip.ZipArchiveMountProvider"
+	]
+}
