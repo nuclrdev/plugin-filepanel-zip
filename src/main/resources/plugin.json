@@ -10,6 +10,9 @@
 	"pageUrl": "https://nuclr.dev/plugins/core/filepanel-zip.html",
 	"docUrl": "https://nuclr.dev/plugins/core/filepanel-zip.html",
 	"type": "Official",
+	"filePanelProviders": [
+		"dev.nuclr.plugin.core.mount.zip.ZipFilePanelProvider"
+	],
 	"archiveMountProviders": [
 		"dev.nuclr.plugin.core.mount.zip.ZipArchiveMountProvider"
 	]
