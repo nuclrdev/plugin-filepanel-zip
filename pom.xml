@@ -22,6 +22,13 @@
 			<groupId>dev.nuclr</groupId>
 			<artifactId>plugins-sdk</artifactId>
 			<version>1.0.0</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.fasterxml.jackson.core</groupId>
+			<artifactId>jackson-databind</artifactId>
+			<version>2.21.1</version>
+			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>net.lingala.zip4j</groupId>
