@@ -107,6 +107,26 @@ public class ZipFilePanel extends JPanel {
 				}
 			}
 		});
+		table.getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+				.put(KeyStroke.getKeyStroke("LEFT"), "pageUpSelection");
+		table.getActionMap().put("pageUpSelection", new AbstractAction() {
+			private static final long serialVersionUID = 1L;
+
+			@Override
+			public void actionPerformed(java.awt.event.ActionEvent e) {
+				moveSelectionByPage(-1);
+			}
+		});
+		table.getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+				.put(KeyStroke.getKeyStroke("RIGHT"), "pageDownSelection");
+		table.getActionMap().put("pageDownSelection", new AbstractAction() {
+			private static final long serialVersionUID = 1L;
+
+			@Override
+			public void actionPerformed(java.awt.event.ActionEvent e) {
+				moveSelectionByPage(1);
+			}
+		});
 
 		table.getSelectionModel().addListSelectionListener(e -> {
 			if (!e.getValueIsAdjusting()) {
@@ -300,6 +320,25 @@ public class ZipFilePanel extends JPanel {
 		}
 		String type = entry.directory() ? "Folder" : entry.archive() ? "Archive" : humanReadableSize(entry.sizeBytes());
 		statusLabel.setText(entry.name() + "  |  " + type);
+	}
+
+	private void moveSelectionByPage(int direction) {
+		int rowCount = model.getRowCount();
+		if (rowCount == 0) {
+			return;
+		}
+
+		int currentRow = table.getSelectedRow();
+		if (currentRow < 0) {
+			currentRow = 0;
+		}
+
+		int visibleRows = Math.max(1, table.getVisibleRect().height / Math.max(1, table.getRowHeight()));
+		int targetRow = currentRow + (visibleRows * direction);
+		targetRow = Math.max(0, Math.min(rowCount - 1, targetRow));
+
+		table.setRowSelectionInterval(targetRow, targetRow);
+		table.scrollRectToVisible(table.getCellRect(targetRow, 0, true));
 	}
 
 	private boolean selectPath(Path selectedPath) {
