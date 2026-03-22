@@ -45,6 +45,7 @@ public class ZipFilePanel extends JPanel {
 	private final ZipFilePanelModel model;
 	private final Border inactiveBorder;
 	private final Border activeBorder;
+	private final FileNameHighlighter fileNameHighlighter;
 	private final ZipFilePanelProvider provider;
 	private final Runnable helpAction;
 
@@ -65,6 +66,7 @@ public class ZipFilePanel extends JPanel {
 								? UIManager.getColor("Table.selectionBackground")
 								: java.awt.Color.GRAY),
 				BorderFactory.createEmptyBorder(3, 3, 3, 3));
+		fileNameHighlighter = new FileNameHighlighter(table.getForeground());
 
 		setLayout(new BorderLayout(0, 4));
 		setBorder(inactiveBorder);
@@ -73,7 +75,7 @@ public class ZipFilePanel extends JPanel {
 		statusLabel.setBorder(BorderFactory.createEmptyBorder(0, 4, 0, 4));
 
 		table.setFillsViewportHeight(true);
-		table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+		table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
 		table.getTableHeader().setReorderingAllowed(false);
 		table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
 		table.getColumnModel().getColumn(1).setPreferredWidth(100);
@@ -188,13 +190,25 @@ public class ZipFilePanel extends JPanel {
 		}
 	}
 
+	public Path getCurrentDirectory() {
+		return currentDirectory;
+	}
+
 	public PluginPathResource getSelectedResource() {
-		int row = table.getSelectedRow();
-		if (row < 0) {
-			return null;
+		List<PluginPathResource> selected = getSelectedResources();
+		return selected.isEmpty() ? null : selected.get(0);
+	}
+
+	public List<PluginPathResource> getSelectedResources() {
+		int[] selectedRows = table.getSelectedRows();
+		List<PluginPathResource> resources = new ArrayList<>();
+		for (int selectedRow : selectedRows) {
+			ZipFilePanelModel.Entry entry = model.getEntryAt(table.convertRowIndexToModel(selectedRow));
+			if (!entry.parent()) {
+				resources.add(provider.toResource(entry.path()));
+			}
 		}
-		ZipFilePanelModel.Entry entry = model.getEntryAt(table.convertRowIndexToModel(row));
-		return provider.toResource(entry.path());
+		return resources;
 	}
 
 	public Path getSelectedPath() {
@@ -379,13 +393,18 @@ public class ZipFilePanel extends JPanel {
 				int row,
 				int column) {
 			Component component = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+			ZipFilePanel panel = (ZipFilePanel) SwingUtilities.getAncestorOfClass(ZipFilePanel.class, table);
 			ZipFilePanelModel model = (ZipFilePanelModel) table.getModel();
 			ZipFilePanelModel.Entry entry = model.getEntryAt(table.convertRowIndexToModel(row));
 			component.setFont(table.getFont().deriveFont((entry.directory() || entry.archive()) ? Font.BOLD : Font.PLAIN));
 			if (component instanceof JLabel label) {
 				label.setHorizontalAlignment(column == 1 ? SwingConstants.RIGHT : SwingConstants.LEFT);
+				if (!isSelected && column == 0 && panel != null) {
+					label.setForeground(panel.fileNameHighlighter.colorFor(entry));
+				}
 			}
 			return component;
 		}
 	}
 }
+

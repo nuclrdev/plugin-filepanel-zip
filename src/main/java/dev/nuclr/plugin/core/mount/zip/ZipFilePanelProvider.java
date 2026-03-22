@@ -27,10 +27,14 @@ import dev.nuclr.plugin.PanelProviderPlugin;
 import dev.nuclr.plugin.PluginManifest;
 import dev.nuclr.plugin.PluginPathResource;
 import dev.nuclr.plugin.event.PluginClosePanelEvent;
+import dev.nuclr.plugin.event.PluginCopyEvent;
+import dev.nuclr.plugin.event.PluginEvent;
+import dev.nuclr.plugin.event.PluginMoveEvent;
 import dev.nuclr.plugin.event.PluginOpenItemEvent;
+import dev.nuclr.plugin.event.bus.PluginEventListener;
 import net.lingala.zip4j.ZipFile;
 
-public class ZipFilePanelProvider implements PanelProviderPlugin {
+public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventListener {
 
 	private static final Set<String> HANDLED_EXTENSIONS = Set.of(".zip", ".jar", ".war", ".ear");
 	private static final String PANEL_STACK_PROVIDER_CLASS_METADATA = "commander.panelStack.providerClass";
@@ -66,16 +70,26 @@ public class ZipFilePanelProvider implements PanelProviderPlugin {
 
 	@Override
 	public List<MenuResource> getMenuItems(PluginPathResource source) {
-		return List.of();
+		List<MenuResource> items = new ArrayList<>();
+		items.add(menu("Help", "F1", "help"));
+		items.add(menu("Copy", "F5", "copy"));
+		items.add(menu("Move", "F6", "move"));
+		items.add(menu("Quit", "F10", "quit"));
+		items.add(menu("Plugins", "F11", "plugins"));
+		return items;
 	}
 
 	@Override
 	public void load(ApplicationPluginContext context) {
 		this.context = context;
+		context.getEventBus().subscribe(this);
 	}
 
 	@Override
 	public void unload() {
+		if (context != null) {
+			context.getEventBus().unsubscribe(this);
+		}
 		for (FileSystem fileSystem : mountedFileSystems.values()) {
 			try {
 				fileSystem.close();
@@ -107,13 +121,31 @@ public class ZipFilePanelProvider implements PanelProviderPlugin {
 		if (browsablePath == null) {
 			return false;
 		}
-		ZipFilePanel zipPanel = (ZipFilePanel) getPanel();
-		if (isArchiveRoot(browsablePath)) {
-			zipPanel.showArchiveRoot(browsablePath);
-		} else {
-			zipPanel.showDirectory(browsablePath);
-		}
+		((ZipFilePanel) getPanel()).showDirectory(browsablePath);
 		return true;
+	}
+
+	@Override
+	public boolean isMessageSupported(PluginEvent msg) {
+		return msg instanceof ZipMenuActionEvent;
+	}
+
+	@Override
+	public void handleMessage(PluginEvent event) {
+		if (!focused || !(event instanceof ZipMenuActionEvent actionEvent)) {
+			return;
+		}
+		if ("copy".equals(actionEvent.getActionId())) {
+			context.getEventBus().emit(new PluginCopyEvent(this, ((ZipFilePanel) getPanel()).getSelectedResources()));
+			return;
+		}
+		if ("move".equals(actionEvent.getActionId())) {
+			context.getEventBus().emit(new PluginMoveEvent(this, ((ZipFilePanel) getPanel()).getSelectedResources()));
+			return;
+		}
+		if ("help".equals(actionEvent.getActionId())) {
+			openDocumentation();
+		}
 	}
 
 	public boolean isArchivePath(Path path) {
@@ -293,6 +325,10 @@ public class ZipFilePanelProvider implements PanelProviderPlugin {
 		metadata.put(PANEL_STACK_PROVIDER_CLASS_METADATA, getClass().getName());
 		resource.setMetadata(metadata);
 		return resource;
+	}
+
+	private static MenuResource menu(String name, String keyStroke, String actionId) {
+		return new ZipMenuResource(name, keyStroke, new ZipMenuActionEvent(actionId));
 	}
 
 	private void openDocumentation() {
