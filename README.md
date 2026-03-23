@@ -1,26 +1,31 @@
-# Nuclr File Panel ZIP Plugin
+# Nuclr File Panel Archive Plugin
 
-`filepanel-zip` is an official Nuclr plugin that lets the file panel browse ZIP-family archives with the current Nuclr panel plugin SDK.
+`filepanel-zip` is an official Nuclr plugin that lets the file panel browse common archive formats with the current Nuclr panel plugin SDK.
 
 It currently supports:
 - `.zip`
 - `.jar`
 - `.war`
 - `.ear`
+- `.rar`
+- `.tar`
+- `.gz`
+- `.tgz`
+- `.tar.gz`
 
 ## What It Does
 
 The plugin now registers a `PanelProviderPlugin` (`ZipFilePanelProvider`) that:
 - Starts from normal filesystem roots, like the local filesystem panel.
-- Lets the user enter `.zip`, `.jar`, `.war`, and `.ear` files directly from the panel.
+- Lets the user enter supported archive files directly from the panel.
 - Mounts non-encrypted archives through the Java NIO ZIP filesystem provider.
-- Extracts encrypted archives to a temporary directory so they can still be browsed.
+- Extracts encrypted ZIP-family archives, plus RAR/TAR/GZ archives, to a temporary directory so they can still be browsed.
 - Lets files inside archives participate in quick view and external open flows.
 
 ## Plugin Metadata
 
 - Plugin ID: `dev.nuclr.plugin.core.mount.zip`
-- Name: `ZIP Archive Panel`
+- Name: `Archive Panel`
 - Version: `1.0.0`
 - SDK dependency: `dev.nuclr:plugins-sdk:1.0.0` (`provided`)
 - Java version: `21`

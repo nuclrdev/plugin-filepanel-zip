@@ -1,13 +1,16 @@
 package dev.nuclr.plugin.core.mount.zip;
 
 import java.awt.Desktop;
+import java.io.BufferedInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -19,7 +22,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.swing.JComponent;
 
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+import org.apache.commons.compress.utils.IOUtils;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.junrar.Archive;
+import com.github.junrar.rarfile.FileHeader;
 
 import dev.nuclr.plugin.ApplicationPluginContext;
 import dev.nuclr.plugin.MenuResource;
@@ -36,7 +46,8 @@ import net.lingala.zip4j.ZipFile;
 
 public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventListener {
 
-	private static final Set<String> HANDLED_EXTENSIONS = Set.of(".zip", ".jar", ".war", ".ear");
+	private static final Set<String> ZIP_FAMILY_EXTENSIONS = Set.of(".zip", ".jar", ".war", ".ear");
+	private static final Set<String> HANDLED_EXTENSIONS = Set.of(".zip", ".jar", ".war", ".ear", ".rar", ".tar", ".gz", ".tgz");
 	private static final String PANEL_STACK_PROVIDER_CLASS_METADATA = "commander.panelStack.providerClass";
 
 	private final ConcurrentHashMap<URI, FileSystem> mountedFileSystems = new ConcurrentHashMap<>();
@@ -149,11 +160,7 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 	}
 
 	public boolean isArchivePath(Path path) {
-		if (path == null || path.getFileName() == null) {
-			return false;
-		}
-		String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
-		return HANDLED_EXTENSIONS.stream().anyMatch(name::endsWith);
+		return archiveType(path) != null;
 	}
 
 	public Path resolveBrowsablePath(Path path) {
@@ -267,41 +274,50 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 
 	private Path mountArchive(Path archivePath) throws IOException {
 		Path mountSource = materializeArchiveIfNeeded(archivePath);
-		if (isEncryptedArchive(mountSource)) {
-			Path extractedRoot = extractedArchiveRoots.entrySet().stream()
-					.filter(entry -> archivePath.equals(entry.getValue()))
-					.map(Map.Entry::getKey)
-					.filter(Files::isDirectory)
-					.findFirst()
-					.orElse(null);
-			if (extractedRoot != null) {
-				return extractedRoot;
+		ArchiveType archiveType = archiveType(archivePath);
+		if (archiveType == null) {
+			return null;
+		}
+		if (archiveType.usesZipFileSystem()) {
+			if (isEncryptedArchive(mountSource)) {
+				Path extractedRoot = findExtractedRoot(archivePath);
+				if (extractedRoot != null) {
+					return extractedRoot;
+				}
+				Path tempDir = createTempExtractionRoot("nuclr-zip-");
+				new ZipFile(mountSource.toFile()).extractAll(tempDir.toString());
+				extractedArchiveRoots.put(tempDir, archivePath);
+				return tempDir;
 			}
-			Path tempDir = Files.createTempDirectory("nuclr-zip-");
-			tempDir.toFile().deleteOnExit();
-			new ZipFile(mountSource.toFile()).extractAll(tempDir.toString());
-			extractedArchiveRoots.put(tempDir, archivePath);
-			return tempDir;
+
+			URI uri = URI.create("jar:" + mountSource.toUri());
+			FileSystem existing = mountedFileSystems.get(uri);
+			if (existing != null && existing.isOpen()) {
+				return existing.getPath("/");
+			}
+
+			FileSystem created = FileSystems.newFileSystem(uri, Map.of());
+			FileSystem previous = mountedFileSystems.put(uri, created);
+			if (previous != null && previous.isOpen()) {
+				try {
+					created.close();
+				} catch (IOException ignored) {
+					// keep existing fs
+				}
+				return previous.getPath("/");
+			}
+			mountedArchiveSources.put(created, archivePath);
+			return created.getPath("/");
 		}
 
-		URI uri = URI.create("jar:" + mountSource.toUri());
-		FileSystem existing = mountedFileSystems.get(uri);
-		if (existing != null && existing.isOpen()) {
-			return existing.getPath("/");
+		Path extractedRoot = findExtractedRoot(archivePath);
+		if (extractedRoot != null) {
+			return extractedRoot;
 		}
-
-		FileSystem created = FileSystems.newFileSystem(uri, Map.of());
-		FileSystem previous = mountedFileSystems.put(uri, created);
-		if (previous != null && previous.isOpen()) {
-			try {
-				created.close();
-			} catch (IOException ignored) {
-				// keep existing fs
-			}
-			return previous.getPath("/");
-		}
-		mountedArchiveSources.put(created, archivePath);
-		return created.getPath("/");
+		Path tempDir = createTempExtractionRoot("nuclr-archive-");
+		extractArchive(mountSource, archiveType, tempDir);
+		extractedArchiveRoots.put(tempDir, archivePath);
+		return tempDir;
 	}
 
 	private Path materializeArchiveIfNeeded(Path archivePath) throws IOException {
@@ -316,6 +332,172 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 			return new ZipFile(archivePath.toFile()).isEncrypted();
 		} catch (Exception ignored) {
 			return false;
+		}
+	}
+
+	private Path findExtractedRoot(Path archivePath) {
+		return extractedArchiveRoots.entrySet().stream()
+				.filter(entry -> archivePath.equals(entry.getValue()))
+				.map(Map.Entry::getKey)
+				.filter(Files::isDirectory)
+				.findFirst()
+				.orElse(null);
+	}
+
+	private Path createTempExtractionRoot(String prefix) throws IOException {
+		Path tempDir = Files.createTempDirectory(prefix);
+		tempDir.toFile().deleteOnExit();
+		return tempDir;
+	}
+
+	private void extractArchive(Path archivePath, ArchiveType archiveType, Path targetDir) throws IOException {
+		switch (archiveType) {
+			case RAR -> extractRar(archivePath, targetDir);
+			case TAR -> extractTar(archivePath, targetDir);
+			case GZIP -> extractGzip(archivePath, targetDir);
+			default -> throw new IOException("Unsupported archive type: " + archiveType);
+		}
+	}
+
+	private void extractTar(Path archivePath, Path targetDir) throws IOException {
+		try (InputStream inputStream = Files.newInputStream(archivePath);
+				BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream);
+				TarArchiveInputStream tarInputStream = new TarArchiveInputStream(bufferedInputStream)) {
+			extractTarStream(tarInputStream, targetDir);
+		}
+	}
+
+	private void extractGzip(Path archivePath, Path targetDir) throws IOException {
+		try (InputStream inputStream = Files.newInputStream(archivePath);
+				BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream);
+				GzipCompressorInputStream gzipInputStream = new GzipCompressorInputStream(bufferedInputStream)) {
+			String name = archivePath.getFileName() == null ? "" : archivePath.getFileName().toString().toLowerCase(Locale.ROOT);
+			if (name.endsWith(".tar.gz") || name.endsWith(".tgz")) {
+				try (TarArchiveInputStream tarInputStream = new TarArchiveInputStream(gzipInputStream)) {
+					extractTarStream(tarInputStream, targetDir);
+				}
+				return;
+			}
+
+			String outputName = stripSingleExtension(archivePath.getFileName() == null ? "archive-entry.gz" : archivePath.getFileName().toString(), ".gz");
+			Path outputPath = resolveArchiveEntryPath(targetDir, outputName);
+			if (outputPath == null) {
+				throw new IOException("Invalid GZ entry name: " + outputName);
+			}
+			Path parent = outputPath.getParent();
+			if (parent != null) {
+				Files.createDirectories(parent);
+			}
+			try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+				IOUtils.copy(gzipInputStream, outputStream);
+			}
+		}
+	}
+
+	private void extractTarStream(TarArchiveInputStream tarInputStream, Path targetDir) throws IOException {
+		TarArchiveEntry entry;
+		while ((entry = tarInputStream.getNextTarEntry()) != null) {
+			Path outputPath = resolveArchiveEntryPath(targetDir, entry.getName());
+			if (outputPath == null) {
+				throw new IOException("Invalid TAR entry name: " + entry.getName());
+			}
+			if (entry.isDirectory()) {
+				Files.createDirectories(outputPath);
+				continue;
+			}
+			Path parent = outputPath.getParent();
+			if (parent != null) {
+				Files.createDirectories(parent);
+			}
+			try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+				IOUtils.copy(tarInputStream, outputStream);
+			}
+		}
+	}
+
+	private void extractRar(Path archivePath, Path targetDir) throws IOException {
+		try (Archive archive = new Archive(archivePath.toFile())) {
+			FileHeader entry;
+			while ((entry = archive.nextFileHeader()) != null) {
+				String entryName = entry.getFileNameString();
+				Path outputPath = resolveArchiveEntryPath(targetDir, entryName);
+				if (outputPath == null) {
+					throw new IOException("Invalid RAR entry name: " + entryName);
+				}
+				if (entry.isDirectory()) {
+					Files.createDirectories(outputPath);
+					continue;
+				}
+				Path parent = outputPath.getParent();
+				if (parent != null) {
+					Files.createDirectories(parent);
+				}
+				try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+					archive.extractFile(entry, outputStream);
+				}
+			}
+		} catch (Exception ex) {
+			throw ex instanceof IOException ioException ? ioException : new IOException("Cannot extract RAR archive", ex);
+		}
+	}
+
+	private Path resolveArchiveEntryPath(Path targetDir, String entryName) {
+		if (entryName == null || entryName.isBlank()) {
+			return null;
+		}
+		String normalizedName = entryName.replace('\\', '/');
+		while (normalizedName.startsWith("/")) {
+			normalizedName = normalizedName.substring(1);
+		}
+		if (normalizedName.isBlank()) {
+			return null;
+		}
+		Path resolvedPath = targetDir.resolve(normalizedName).normalize();
+		return resolvedPath.startsWith(targetDir.normalize()) ? resolvedPath : null;
+	}
+
+	private ArchiveType archiveType(Path path) {
+		if (path == null || path.getFileName() == null) {
+			return null;
+		}
+		String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+		if (name.endsWith(".tar.gz") || name.endsWith(".tgz")) {
+			return ArchiveType.GZIP;
+		}
+		if (ZIP_FAMILY_EXTENSIONS.stream().anyMatch(name::endsWith)) {
+			return ArchiveType.ZIP_FAMILY;
+		}
+		if (name.endsWith(".rar")) {
+			return ArchiveType.RAR;
+		}
+		if (name.endsWith(".tar")) {
+			return ArchiveType.TAR;
+		}
+		if (name.endsWith(".gz")) {
+			return ArchiveType.GZIP;
+		}
+		return HANDLED_EXTENSIONS.stream().anyMatch(name::endsWith) ? ArchiveType.GZIP : null;
+	}
+
+	private static String stripSingleExtension(String fileName, String extension) {
+		if (fileName == null || fileName.isBlank()) {
+			return "archive-entry";
+		}
+		String lowerCaseName = fileName.toLowerCase(Locale.ROOT);
+		if (lowerCaseName.endsWith(extension) && fileName.length() > extension.length()) {
+			return fileName.substring(0, fileName.length() - extension.length());
+		}
+		return fileName + ".out";
+	}
+
+	private enum ArchiveType {
+		ZIP_FAMILY,
+		RAR,
+		TAR,
+		GZIP;
+
+		boolean usesZipFileSystem() {
+			return this == ZIP_FAMILY;
 		}
 	}
 
