@@ -52,9 +52,15 @@ public final class ZipFilePanelModel extends AbstractTableModel {
 	public Object getValueAt(int rowIndex, int columnIndex) {
 		Entry entry = entries.get(rowIndex);
 		return switch (columnIndex) {
-			case 0 -> entry.name();
-			case 1 -> entry.parent() ? "" : (entry.directory() ? "Folder" : entry.archive() ? "Archive" : humanReadableSize(entry.sizeBytes()));
-			case 2 -> formatModified(entry.modifiedTime());
+			case 0 -> entry.getName();
+			case 1 -> entry.isParent()
+					? ""
+					: entry.isDirectory()
+					? "Folder"
+					: entry.isArchive()
+					? "Archive"
+					: humanReadableSize(entry.getSizeBytes());
+			case 2 -> formatModified(entry.getModifiedTime());
 			default -> "";
 		};
 	}
@@ -73,7 +79,7 @@ public final class ZipFilePanelModel extends AbstractTableModel {
 			return sizeBytes + " B";
 		}
 		double value = sizeBytes;
-		String[] units = {"KB", "MB", "GB", "TB", "PB"};
+		String[] units = { "KB", "MB", "GB", "TB", "PB" };
 		int unitIndex = -1;
 		while (value >= 1024 && unitIndex < units.length - 1) {
 			value /= 1024;
@@ -82,18 +88,57 @@ public final class ZipFilePanelModel extends AbstractTableModel {
 		return String.format(Locale.ROOT, unitIndex == 0 ? "%.0f %s" : "%.1f %s", value, units[unitIndex]);
 	}
 
-	public record Entry(
-			Path path,
-			String name,
-			boolean directory,
-			boolean parent,
-			boolean archive,
-			long sizeBytes,
-			FileTime modifiedTime,
-			Path returnSelectionPath) {
+	// -------------------------------------------------------------------------
+	// Entry — one row in the archive listing
+	// -------------------------------------------------------------------------
 
+	public static final class Entry {
+
+		private final Path path;
+		private final String name;
+		private final boolean directory;
+		private final boolean parent;
+		private final boolean archive;
+		private final long sizeBytes;
+		private final FileTime modifiedTime;
+
+		/**
+		 * The path the panel should navigate back to after pressing ".." on this entry.
+		 * For the ".." row this is the path that was selected before entering the folder.
+		 */
+		private final Path returnSelectionPath;
+
+		public Entry(
+				Path path,
+				String name,
+				boolean directory,
+				boolean parent,
+				boolean archive,
+				long sizeBytes,
+				FileTime modifiedTime,
+				Path returnSelectionPath) {
+			this.path = path;
+			this.name = name;
+			this.directory = directory;
+			this.parent = parent;
+			this.archive = archive;
+			this.sizeBytes = sizeBytes;
+			this.modifiedTime = modifiedTime;
+			this.returnSelectionPath = returnSelectionPath;
+		}
+
+		/** Creates the ".." parent-navigation row. */
 		public static Entry parent(Path parentPath, Path returnSelectionPath) {
 			return new Entry(parentPath, "..", true, true, false, 0L, null, returnSelectionPath);
 		}
+
+		public Path getPath()                { return path; }
+		public String getName()              { return name; }
+		public boolean isDirectory()         { return directory; }
+		public boolean isParent()            { return parent; }
+		public boolean isArchive()           { return archive; }
+		public long getSizeBytes()           { return sizeBytes; }
+		public FileTime getModifiedTime()    { return modifiedTime; }
+		public Path getReturnSelectionPath() { return returnSelectionPath; }
 	}
 }

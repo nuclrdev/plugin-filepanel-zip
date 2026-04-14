@@ -6,6 +6,7 @@ import java.util.Map;
 import dev.nuclr.platform.plugin.NuclrResourcePath;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
+import lombok.NoArgsConstructor;
 
 @Getter
 @AllArgsConstructor
