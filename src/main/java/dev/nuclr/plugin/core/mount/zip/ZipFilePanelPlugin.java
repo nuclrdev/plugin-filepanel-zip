@@ -1,6 +1,5 @@
 package dev.nuclr.plugin.core.mount.zip;
 
-import java.awt.Desktop;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -27,61 +26,48 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.apache.commons.compress.utils.IOUtils;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.junrar.Archive;
 import com.github.junrar.rarfile.FileHeader;
 
-import dev.nuclr.plugin.ApplicationPluginContext;
-import dev.nuclr.plugin.MenuResource;
-import dev.nuclr.plugin.PanelProviderPlugin;
-import dev.nuclr.plugin.PluginManifest;
-import dev.nuclr.plugin.PluginPathResource;
+import dev.nuclr.platform.NuclrThemeScheme;
+import dev.nuclr.platform.events.NuclrEventListener;
+import dev.nuclr.platform.plugin.NuclrMenuResource;
+import dev.nuclr.platform.plugin.NuclrPlugin;
+import dev.nuclr.platform.plugin.NuclrPluginContext;
+import dev.nuclr.platform.plugin.NuclrPluginRole;
+import dev.nuclr.platform.plugin.NuclrResourcePath;
 import dev.nuclr.plugin.event.PluginClosePanelEvent;
-import dev.nuclr.plugin.event.PluginCopyEvent;
-import dev.nuclr.plugin.event.PluginEvent;
-import dev.nuclr.plugin.event.PluginMoveEvent;
 import dev.nuclr.plugin.event.PluginOpenItemEvent;
-import dev.nuclr.plugin.event.bus.PluginEventListener;
+import lombok.extern.slf4j.Slf4j;
 import net.lingala.zip4j.ZipFile;
 
-public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventListener {
+@Slf4j
+public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 	private static final Set<String> ZIP_FAMILY_EXTENSIONS = Set.of(".zip", ".jar", ".war", ".ear");
-	private static final Set<String> HANDLED_EXTENSIONS = Set.of(".zip", ".jar", ".war", ".ear", ".rar", ".tar", ".gz", ".tgz");
+	private static final Set<String> HANDLED_EXTENSIONS = Set.of(".zip", ".jar", ".war", ".ear", ".rar", ".tar", ".gz",
+			".tgz");
 	private static final String PANEL_STACK_PROVIDER_CLASS_METADATA = "commander.panelStack.providerClass";
 
 	private final ConcurrentHashMap<URI, FileSystem> mountedFileSystems = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<FileSystem, Path> mountedArchiveSources = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<Path, Path> extractedArchiveRoots = new ConcurrentHashMap<>();
 
-	private ApplicationPluginContext context;
+	private NuclrPluginContext context;
 	private ZipFilePanel panel;
 	private boolean focused;
 
 	@Override
-	public PluginManifest getPluginInfo() {
-		ObjectMapper objectMapper = context != null ? context.getObjectMapper() : new ObjectMapper();
-		try (var is = getClass().getResourceAsStream("/plugin.json")) {
-			if (is != null) {
-				return objectMapper.readValue(is, PluginManifest.class);
-			}
-		} catch (Exception ignored) {
-			return null;
-		}
-		return null;
-	}
-
-	@Override
-	public JComponent getPanel() {
+	public JComponent panel() {
 		if (panel == null) {
-			panel = new ZipFilePanel(this, this::openDocumentation);
+			panel = new ZipFilePanel(this);
 		}
 		return panel;
 	}
 
 	@Override
-	public List<MenuResource> getMenuItems(PluginPathResource source) {
-		List<MenuResource> items = new ArrayList<>();
+	public List<NuclrMenuResource> menuItems(NuclrResourcePath source) {
+		List<NuclrMenuResource> items = new ArrayList<>();
 		items.add(menu("Help", "F1", "help"));
 		items.add(menu("Copy", "F5", "copy"));
 		items.add(menu("Move", "F6", "move"));
@@ -90,10 +76,22 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 		return items;
 	}
 
+	private NuclrMenuResource menu(String name, String shortcut, String eventType) {
+		var m = new ZipMenuResource();
+		m.setName(name);
+		m.setKeyStroke(shortcut);
+		m.setEventType(eventType);
+		return m;
+	}
+
 	@Override
-	public void load(ApplicationPluginContext context) {
+	public void load(NuclrPluginContext context, boolean template) {
+
 		this.context = context;
-		context.getEventBus().subscribe(this);
+
+		if (false == template) {
+			context.getEventBus().subscribe(this);
+		}
 	}
 
 	@Override
@@ -114,14 +112,14 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 	}
 
 	@Override
-	public List<PluginPathResource> getChangeDriveResources() {
-		var resources = new ArrayList<PluginPathResource>();
+	public List<NuclrResourcePath> getChangeDriveResources() {
+		var resources = new ArrayList<NuclrResourcePath>();
 		FileSystems.getDefault().getRootDirectories().forEach(path -> resources.add(toResource(path)));
 		return resources;
 	}
 
 	@Override
-	public boolean openItem(PluginPathResource resource, AtomicBoolean cancelled) {
+	public boolean openResource(NuclrResourcePath resource, AtomicBoolean cancelled) {
 		if (cancelled != null && cancelled.get()) {
 			return false;
 		}
@@ -132,30 +130,38 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 		if (browsablePath == null) {
 			return false;
 		}
-		((ZipFilePanel) getPanel()).showDirectory(browsablePath);
+		panel.showDirectory(browsablePath);
 		return true;
 	}
 
 	@Override
-	public boolean isMessageSupported(PluginEvent msg) {
-		return msg instanceof ZipMenuActionEvent;
+	public boolean isMessageSupported(String type) {
+		return true;
 	}
 
 	@Override
-	public void handleMessage(PluginEvent event) {
-		if (!focused || !(event instanceof ZipMenuActionEvent actionEvent)) {
+	public void handleMessage(Object source, String type, Map<String, Object> event) {
+
+		// Ignore its own events
+		if (source == this || source == panel) {
 			return;
 		}
-		if ("copy".equals(actionEvent.getActionId())) {
-			context.getEventBus().emit(new PluginCopyEvent(this, ((ZipFilePanel) getPanel()).getSelectedResources()));
+
+		log.info("Received message - Source: {}, Type: {}, Event: {}", source, type, event);
+
+		if (!focused || !(type.equals("ZipMenuActionEvent"))) {
 			return;
 		}
-		if ("move".equals(actionEvent.getActionId())) {
-			context.getEventBus().emit(new PluginMoveEvent(this, ((ZipFilePanel) getPanel()).getSelectedResources()));
+
+		if ("fs.copy".equals(type)) {
+			// context.getEventBus().emit(new PluginCopyEvent(this,
+			// panel.getSelectedResources()).getSourceProvider());
 			return;
 		}
-		if ("help".equals(actionEvent.getActionId())) {
-			openDocumentation();
+		if ("fs.move".equals(type)) {
+			// context.getEventBus().emit(new PluginMoveEvent(this, ((ZipFilePanel)
+			// getPanel()).getSelectedResources()));
+			return;
 		}
 	}
 
@@ -180,8 +186,8 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 		return null;
 	}
 
-	public PluginPathResource toResource(Path path) {
-		var resource = new PluginPathResource();
+	public NuclrResourcePath toResource(Path path) {
+		var resource = new NuclrResourcePath();
 		resource.setPath(path);
 		resource.setName(path.getFileName() == null ? path.toString() : path.getFileName().toString());
 		try {
@@ -198,18 +204,18 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 		if (context == null || !isArchivePath(archivePath)) {
 			return false;
 		}
-		PluginOpenItemEvent event = new PluginOpenItemEvent(this, toStackResource(archivePath));
-		context.getEventBus().emit(event);
-		return event.isHandled();
+		var event = new PluginOpenItemEvent(this, toStackResource(archivePath));
+		context.getEventBus().emit("PluginOpenItemEvent", event.toEventData());
+		return true;
 	}
 
 	public boolean popPanelLayer() {
 		if (context == null) {
 			return false;
 		}
-		PluginClosePanelEvent event = new PluginClosePanelEvent(this);
-		context.getEventBus().emit(event);
-		return event.isHandled();
+		var event = new PluginClosePanelEvent(this).toEvent();
+		context.getEventBus().emit("PluginClosePanelEvent", event);
+		return true;
 	}
 
 	public boolean isArchiveRoot(Path path) {
@@ -336,12 +342,8 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 	}
 
 	private Path findExtractedRoot(Path archivePath) {
-		return extractedArchiveRoots.entrySet().stream()
-				.filter(entry -> archivePath.equals(entry.getValue()))
-				.map(Map.Entry::getKey)
-				.filter(Files::isDirectory)
-				.findFirst()
-				.orElse(null);
+		return extractedArchiveRoots.entrySet().stream().filter(entry -> archivePath.equals(entry.getValue()))
+				.map(Map.Entry::getKey).filter(Files::isDirectory).findFirst().orElse(null);
 	}
 
 	private Path createTempExtractionRoot(String prefix) throws IOException {
@@ -352,10 +354,10 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 
 	private void extractArchive(Path archivePath, ArchiveType archiveType, Path targetDir) throws IOException {
 		switch (archiveType) {
-			case RAR -> extractRar(archivePath, targetDir);
-			case TAR -> extractTar(archivePath, targetDir);
-			case GZIP -> extractGzip(archivePath, targetDir);
-			default -> throw new IOException("Unsupported archive type: " + archiveType);
+		case RAR -> extractRar(archivePath, targetDir);
+		case TAR -> extractTar(archivePath, targetDir);
+		case GZIP -> extractGzip(archivePath, targetDir);
+		default -> throw new IOException("Unsupported archive type: " + archiveType);
 		}
 	}
 
@@ -371,7 +373,8 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 		try (InputStream inputStream = Files.newInputStream(archivePath);
 				BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream);
 				GzipCompressorInputStream gzipInputStream = new GzipCompressorInputStream(bufferedInputStream)) {
-			String name = archivePath.getFileName() == null ? "" : archivePath.getFileName().toString().toLowerCase(Locale.ROOT);
+			String name = archivePath.getFileName() == null ? ""
+					: archivePath.getFileName().toString().toLowerCase(Locale.ROOT);
 			if (name.endsWith(".tar.gz") || name.endsWith(".tgz")) {
 				try (TarArchiveInputStream tarInputStream = new TarArchiveInputStream(gzipInputStream)) {
 					extractTarStream(tarInputStream, targetDir);
@@ -379,7 +382,9 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 				return;
 			}
 
-			String outputName = stripSingleExtension(archivePath.getFileName() == null ? "archive-entry.gz" : archivePath.getFileName().toString(), ".gz");
+			String outputName = stripSingleExtension(
+					archivePath.getFileName() == null ? "archive-entry.gz" : archivePath.getFileName().toString(),
+					".gz");
 			Path outputPath = resolveArchiveEntryPath(targetDir, outputName);
 			if (outputPath == null) {
 				throw new IOException("Invalid GZ entry name: " + outputName);
@@ -388,7 +393,8 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 			if (parent != null) {
 				Files.createDirectories(parent);
 			}
-			try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+			try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE,
+					StandardOpenOption.TRUNCATE_EXISTING)) {
 				IOUtils.copy(gzipInputStream, outputStream);
 			}
 		}
@@ -409,7 +415,8 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 			if (parent != null) {
 				Files.createDirectories(parent);
 			}
-			try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+			try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE,
+					StandardOpenOption.TRUNCATE_EXISTING)) {
 				IOUtils.copy(tarInputStream, outputStream);
 			}
 		}
@@ -432,12 +439,14 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 				if (parent != null) {
 					Files.createDirectories(parent);
 				}
-				try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+				try (var outputStream = Files.newOutputStream(outputPath, StandardOpenOption.CREATE,
+						StandardOpenOption.TRUNCATE_EXISTING)) {
 					archive.extractFile(entry, outputStream);
 				}
 			}
 		} catch (Exception ex) {
-			throw ex instanceof IOException ioException ? ioException : new IOException("Cannot extract RAR archive", ex);
+			throw ex instanceof IOException ioException ? ioException
+					: new IOException("Cannot extract RAR archive", ex);
 		}
 	}
 
@@ -491,47 +500,26 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 	}
 
 	private enum ArchiveType {
-		ZIP_FAMILY,
-		RAR,
-		TAR,
-		GZIP;
+		ZIP_FAMILY, RAR, TAR, GZIP;
 
 		boolean usesZipFileSystem() {
 			return this == ZIP_FAMILY;
 		}
 	}
 
-	private PluginPathResource toStackResource(Path path) {
-		PluginPathResource resource = toResource(path);
+	private NuclrResourcePath toStackResource(Path path) {
+		NuclrResourcePath resource = toResource(path);
 		Map<String, String> metadata = new HashMap<>();
 		metadata.put(PANEL_STACK_PROVIDER_CLASS_METADATA, getClass().getName());
 		resource.setMetadata(metadata);
 		return resource;
 	}
 
-	private static MenuResource menu(String name, String keyStroke, String actionId) {
-		return new ZipMenuResource(name, keyStroke, new ZipMenuActionEvent(actionId));
-	}
-
-	private void openDocumentation() {
-		PluginManifest pluginInfo = getPluginInfo();
-		if (pluginInfo == null || pluginInfo.getDocUrl() == null || pluginInfo.getDocUrl().isBlank()) {
-			return;
-		}
-		if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
-			return;
-		}
-		try {
-			Desktop.getDesktop().browse(URI.create(pluginInfo.getDocUrl()));
-		} catch (Exception ignored) {
-			// best effort
-		}
-	}
-
 	@Override
-	public void onFocusGained() {
+	public boolean onFocusGained() {
 		focused = true;
-		((ZipFilePanel) getPanel()).setPluginFocused(true);
+		panel.setPluginFocused(true);
+		return true;
 	}
 
 	@Override
@@ -547,7 +535,86 @@ public class ZipFilePanelProvider implements PanelProviderPlugin, PluginEventLis
 	}
 
 	@Override
-	public boolean canSupport(PluginPathResource resource) {
+	public boolean supports(NuclrResourcePath resource) {
 		return resource != null && resource.getPath() != null && isArchivePath(resource.getPath());
 	}
+
+	private String name = "Archive Panel";
+	private String id = "dev.nuclr.plugin.core.mount.zip";
+	private String version = "1.0.0";
+	private String description = "Allows browsing ZIP, JAR, WAR, EAR, RAR, TAR and GZ archives in the file panel.";
+	private String author = "Nuclr Development Team";
+	private String license = "Apache-2.0";
+	private String website = "https://nuclr.dev";
+	private String pageUrl = "https://nuclr.dev/plugins/core/filepanel-zip.html";
+	private String docUrl = "https://nuclr.dev/plugins/core/filepanel-zip.html";
+
+	@Override
+	public String id() {
+		return id;
+	}
+
+	@Override
+	public String name() {
+		return name;
+	}
+
+	@Override
+	public String version() {
+		return version;
+	}
+
+	@Override
+	public String description() {
+		return description;
+	}
+
+	@Override
+	public String author() {
+		return author;
+	}
+
+	@Override
+	public String license() {
+		return license;
+	}
+
+	@Override
+	public String website() {
+		return website;
+	}
+
+	@Override
+	public String pageUrl() {
+		return pageUrl;
+	}
+
+	@Override
+	public String docUrl() {
+		return docUrl;
+	}
+
+	@Override
+	public Developer type() {
+		return Developer.Official;
+	}
+
+	@Override
+	public void closeResource() {
+	}
+
+	@Override
+	public int priority() {
+		return 0;
+	}
+
+	@Override
+	public void updateTheme(NuclrThemeScheme themeScheme) {
+	}
+
+	@Override
+	public NuclrPluginRole role() {
+		return NuclrPluginRole.FilePanel;
+	}
+
 }

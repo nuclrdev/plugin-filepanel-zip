@@ -1,16 +1,12 @@
 package dev.nuclr.plugin.core.mount.zip;
 
-import dev.nuclr.plugin.event.PluginEvent;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 
-public final class ZipMenuActionEvent extends PluginEvent {
+@Getter
+@AllArgsConstructor
+public final class ZipMenuActionEvent {
 
 	private final String actionId;
 
-	public ZipMenuActionEvent(String actionId) {
-		this.actionId = actionId;
-	}
-
-	public String getActionId() {
-		return actionId;
-	}
 }

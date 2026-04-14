@@ -8,7 +8,6 @@ import java.awt.Point;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.IOException;
-import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,7 +18,6 @@ import java.util.List;
 
 import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
-import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -33,7 +31,7 @@ import javax.swing.UIManager;
 import javax.swing.border.Border;
 import javax.swing.table.DefaultTableCellRenderer;
 
-import dev.nuclr.plugin.PluginPathResource;
+import dev.nuclr.platform.plugin.NuclrResourcePath;
 
 public class ZipFilePanel extends JPanel {
 
@@ -46,15 +44,13 @@ public class ZipFilePanel extends JPanel {
 	private final Border inactiveBorder;
 	private final Border activeBorder;
 	private final FileNameHighlighter fileNameHighlighter;
-	private final ZipFilePanelProvider provider;
-	private final Runnable helpAction;
+	private final ZipFilePanelPlugin provider;
 
 	private Path currentDirectory;
 	private boolean selectTopOnFocus;
 
-	public ZipFilePanel(ZipFilePanelProvider provider, Runnable helpAction) {
+	public ZipFilePanel(ZipFilePanelPlugin provider) {
 		this.provider = provider;
-		this.helpAction = helpAction;
 		model = new ZipFilePanelModel();
 		table = new JTable(model);
 		statusLabel = new JLabel(" ");
@@ -95,18 +91,7 @@ public class ZipFilePanel extends JPanel {
 				openSelectedEntry();
 			}
 		});
-		table.getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
-				.put(KeyStroke.getKeyStroke("F1"), "openHelp");
-		table.getActionMap().put("openHelp", new AbstractAction() {
-			private static final long serialVersionUID = 1L;
 
-			@Override
-			public void actionPerformed(java.awt.event.ActionEvent e) {
-				if (helpAction != null) {
-					helpAction.run();
-				}
-			}
-		});
 		table.getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
 				.put(KeyStroke.getKeyStroke("LEFT"), "pageUpSelection");
 		table.getActionMap().put("pageUpSelection", new AbstractAction() {
@@ -214,14 +199,14 @@ public class ZipFilePanel extends JPanel {
 		return currentDirectory;
 	}
 
-	public PluginPathResource getSelectedResource() {
-		List<PluginPathResource> selected = getSelectedResources();
+	public NuclrResourcePath getSelectedResource() {
+		List<NuclrResourcePath> selected = getSelectedResources();
 		return selected.isEmpty() ? null : selected.get(0);
 	}
 
-	public List<PluginPathResource> getSelectedResources() {
+	public List<NuclrResourcePath> getSelectedResources() {
 		int[] selectedRows = table.getSelectedRows();
-		List<PluginPathResource> resources = new ArrayList<>();
+		List<NuclrResourcePath> resources = new ArrayList<>();
 		for (int selectedRow : selectedRows) {
 			ZipFilePanelModel.Entry entry = model.getEntryAt(table.convertRowIndexToModel(selectedRow));
 			if (!entry.parent()) {
@@ -232,7 +217,7 @@ public class ZipFilePanel extends JPanel {
 	}
 
 	public Path getSelectedPath() {
-		PluginPathResource selectedResource = getSelectedResource();
+		var selectedResource = getSelectedResource();
 		return selectedResource != null ? selectedResource.getPath() : null;
 	}
 

@@ -27,7 +27,7 @@ The plugin now registers a `PanelProviderPlugin` (`ZipFilePanelProvider`) that:
 - Plugin ID: `dev.nuclr.plugin.core.mount.zip`
 - Name: `Archive Panel`
 - Version: `1.0.0`
-- SDK dependency: `dev.nuclr:plugins-sdk:1.0.0` (`provided`)
+- SDK dependency: `dev.nuclr:platform-sdk:2.0.1` (`provided`)
 - Java version: `21`
 
 Metadata file: `src/main/resources/plugin.json`
