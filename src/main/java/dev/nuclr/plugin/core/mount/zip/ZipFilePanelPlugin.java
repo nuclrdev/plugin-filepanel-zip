@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -52,6 +53,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	private final ConcurrentHashMap<URI, FileSystem> mountedFileSystems = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<FileSystem, Path> mountedArchiveSources = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<Path, Path> extractedArchiveRoots = new ConcurrentHashMap<>();
+	private final Set<Path> materializedTempFiles = ConcurrentHashMap.newKeySet();
 
 	private NuclrPluginContext context;
 	private ZipFilePanel panel;
@@ -108,7 +110,32 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		}
 		mountedFileSystems.clear();
 		mountedArchiveSources.clear();
+		for (Path tempDir : extractedArchiveRoots.keySet()) {
+			deleteRecursively(tempDir);
+		}
 		extractedArchiveRoots.clear();
+		for (Path tempFile : materializedTempFiles) {
+			try {
+				Files.deleteIfExists(tempFile);
+			} catch (IOException ignored) {
+				// best effort
+			}
+		}
+		materializedTempFiles.clear();
+	}
+
+	private void deleteRecursively(Path root) {
+		try (var stream = Files.walk(root)) {
+			stream.sorted(Comparator.reverseOrder()).forEach(path -> {
+				try {
+					Files.deleteIfExists(path);
+				} catch (IOException ignored) {
+					// best effort
+				}
+			});
+		} catch (IOException ignored) {
+			// best effort
+		}
 	}
 
 	@Override
@@ -120,6 +147,9 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 	@Override
 	public boolean openResource(NuclrResourcePath resource, AtomicBoolean cancelled) {
+		
+		panel();
+		
 		if (cancelled != null && cancelled.get()) {
 			return false;
 		}
@@ -274,6 +304,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		}
 		Path tempFile = Files.createTempFile("nuclr-" + prefix + "-", suffix);
 		tempFile.toFile().deleteOnExit();
+		materializedTempFiles.add(tempFile);
 		Files.copy(path, tempFile, StandardCopyOption.REPLACE_EXISTING);
 		return tempFile;
 	}
