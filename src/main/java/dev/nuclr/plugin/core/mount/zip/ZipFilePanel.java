@@ -418,7 +418,7 @@ public class ZipFilePanel extends JPanel {
 
 		if (entry.isParent()) {
 			// ".." row: leave archive or navigate to parent directory
-			if (provider.isArchiveRoot(currentDirectory) && provider.popPanelLayer()) {
+			if (provider.isArchiveRoot(currentDirectory) && provider.unloadCurrentInstance()) {
 				return;
 			}
 			showDirectory(entry.getPath(), entry.getReturnSelectionPath());

@@ -63,6 +63,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	private static final String PLUGIN_WEBSITE     = "https://nuclr.dev";
 	private static final String PLUGIN_PAGE_URL    = "https://nuclr.dev/plugins/core/filepanel-zip.html";
 	private static final String PLUGIN_DOC_URL     = PLUGIN_PAGE_URL;
+	private static final String PLUGIN_UNLOAD_EVENT = "plugin.unload";
 
 	// -------------------------------------------------------------------------
 	// Event type constants
@@ -483,6 +484,19 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		}
 		Map<String, Object> event = new PluginClosePanelEvent(this).toEvent();
 		context.getEventBus().emit("PluginClosePanelEvent", event);
+		return true;
+	}
+
+	/**
+	 * Ask the host to unload this plugin instance.
+	 *
+	 * @return {@code true} if the event was emitted
+	 */
+	public boolean unloadCurrentInstance() {
+		if (context == null) {
+			return false;
+		}
+		context.getEventBus().emit(PLUGIN_UNLOAD_EVENT, Map.of("uuid", uuid));
 		return true;
 	}
 
