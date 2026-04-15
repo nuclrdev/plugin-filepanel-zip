@@ -1,5 +1,8 @@
 package dev.nuclr.plugin.core.mount.zip;
 
+import java.awt.BorderLayout;
+import java.awt.Dialog;
+import java.awt.Window;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -11,6 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -21,7 +25,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import javax.swing.BorderFactory;
 import javax.swing.JComponent;
+import javax.swing.JDialog;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPasswordField;
+import javax.swing.SwingUtilities;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
@@ -44,6 +54,7 @@ import dev.nuclr.plugin.event.PluginMoveEvent;
 import dev.nuclr.plugin.event.PluginOpenItemEvent;
 import lombok.extern.slf4j.Slf4j;
 import net.lingala.zip4j.ZipFile;
+import net.lingala.zip4j.exception.ZipException;
 
 @Slf4j
 public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
@@ -251,16 +262,28 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	public boolean openResource(NuclrResourcePath resource, AtomicBoolean cancelled) {
 		panel(); // ensure panel is created
 		if (cancelled != null && cancelled.get()) {
+			unloadCurrentInstance();
 			return false;
 		}
 		if (resource == null || resource.getPath() == null) {
+			unloadCurrentInstance();
 			return false;
 		}
 		Path browsable = resolveBrowsablePath(resource.getPath());
 		if (browsable == null) {
+			unloadCurrentInstance();
 			return false;
 		}
-		panel.showDirectory(browsable);
+
+		// panel.showDirectory is a Swing call — must happen on the EDT.
+		// openResource may be called from a background thread by the Commander
+		// (the AtomicBoolean cancelled parameter is the tell), so we dispatch
+		// showDirectory to the EDT regardless of the current thread.
+		if (SwingUtilities.isEventDispatchThread()) {
+			panel.showDirectory(browsable);
+		} else {
+			SwingUtilities.invokeLater(() -> panel.showDirectory(browsable));
+		}
 		return true;
 	}
 
@@ -688,7 +711,11 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	private Path mountNioZipFilesystem(Path archiveFile, Path originalArchivePath) throws IOException {
 		// Encrypted ZIPs cannot be opened by the NIO ZIP provider — extract instead
 		if (isEncryptedZip(archiveFile)) {
-			return extractToTempDir(archiveFile, originalArchivePath, "nuclr-zip-", this::extractZip);
+			Path existingRoot = findExtractedRoot(originalArchivePath);
+			if (existingRoot != null) {
+				return existingRoot;
+			}
+			return extractEncryptedZipWithPrompt(archiveFile, originalArchivePath);
 		}
 
 		URI uri = URI.create("jar:" + archiveFile.toUri());
@@ -735,9 +762,14 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 		Path tempDir = Files.createTempDirectory(prefix);
 		tempDir.toFile().deleteOnExit();
-		extractor.extract(archiveFile, tempDir);
-		extractedArchiveRoots.put(tempDir, originalArchivePath);
-		return tempDir;
+		try {
+			extractor.extract(archiveFile, tempDir);
+			extractedArchiveRoots.put(tempDir, originalArchivePath);
+			return tempDir;
+		} catch (IOException | RuntimeException ex) {
+			deleteRecursively(tempDir);
+			throw ex;
+		}
 	}
 
 	private Path materializeArchiveIfNeeded(Path archivePath) throws IOException {
@@ -764,6 +796,109 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 				.orElse(null);
 	}
 
+	/**
+	 * Show a password dialog for the given archive and return the entered password,
+	 * or {@code null} if the user cancels.
+	 *
+	 * <p>Safe to call from any thread — dispatches to the EDT via
+	 * {@link SwingUtilities#invokeAndWait} when called from a background thread,
+	 * because {@code openResource} is typically invoked on a virtual thread by
+	 * the Commander while the EDT stays free.
+	 */
+	private char[] promptForArchivePassword(Path archivePath) {
+		String archiveName = archivePath != null && archivePath.getFileName() != null
+				? archivePath.getFileName().toString()
+				: "archive";
+
+		char[][] result = { null };
+
+		Runnable showDialog = () -> {
+			JPasswordField passwordField = new JPasswordField(24);
+			// Request focus inside the dialog so the user can type immediately
+			passwordField.addAncestorListener(new javax.swing.event.AncestorListener() {
+				@Override public void ancestorAdded(javax.swing.event.AncestorEvent e) {
+					passwordField.requestFocusInWindow();
+				}
+				@Override public void ancestorRemoved(javax.swing.event.AncestorEvent e) { }
+				@Override public void ancestorMoved(javax.swing.event.AncestorEvent e) { }
+			});
+			int choice = JOptionPane.showConfirmDialog(
+					panel,
+					new Object[] { "Enter password for \"" + archiveName + "\":", passwordField },
+					"Archive Password",
+					JOptionPane.OK_CANCEL_OPTION,
+					JOptionPane.PLAIN_MESSAGE);
+			if (choice == JOptionPane.OK_OPTION) {
+				result[0] = passwordField.getPassword();
+			}
+		};
+
+		if (SwingUtilities.isEventDispatchThread()) {
+			showDialog.run();
+		} else {
+			try {
+				SwingUtilities.invokeAndWait(showDialog);
+			} catch (InterruptedException ex) {
+				Thread.currentThread().interrupt();
+			} catch (java.lang.reflect.InvocationTargetException ex) {
+				log.warn("Password dialog threw an exception", ex.getCause());
+			}
+		}
+
+		return result[0];
+	}
+
+	/**
+	 * Show an error dialog informing the user that the password they entered was wrong.
+	 * Safe to call from any thread.
+	 */
+	private void showArchivePasswordError(Path archivePath) {
+		String archiveName = archivePath != null && archivePath.getFileName() != null
+				? archivePath.getFileName().toString()
+				: "archive";
+
+		Runnable showDialog = () -> JOptionPane.showMessageDialog(
+				panel,
+				"Incorrect password for \"" + archiveName + "\". Please try again.",
+				"Wrong Password",
+				JOptionPane.ERROR_MESSAGE);
+
+		if (SwingUtilities.isEventDispatchThread()) {
+			showDialog.run();
+		} else {
+			SwingUtilities.invokeLater(showDialog);
+			// invokeLater is sufficient here because this is called from a catch block
+			// inside extractEncryptedZipWithPrompt, which loops back to the next prompt.
+			// The next prompt uses invokeAndWait, which implicitly waits for all prior
+			// invokeLater tasks to finish first, so the error dialog will always appear
+			// before the next password prompt.
+		}
+	}
+
+	private boolean isWrongPasswordError(Throwable error) {
+		Throwable current = error;
+		while (current != null) {
+			if (current instanceof ZipException zipException
+					&& zipException.getType() == ZipException.Type.WRONG_PASSWORD) {
+				return true;
+			}
+			String message = current.getMessage();
+			if (message != null && message.toLowerCase(Locale.ROOT).contains("wrong password")) {
+				return true;
+			}
+			current = current.getCause();
+		}
+		return false;
+	}
+
+	private static final class InvalidArchivePasswordException extends IOException {
+		private static final long serialVersionUID = 1L;
+
+		private InvalidArchivePasswordException(String message, Throwable cause) {
+			super(message, cause);
+		}
+	}
+
 	// =========================================================================
 	// Archive extraction (TAR, RAR, GZIP, encrypted ZIP)
 	// =========================================================================
@@ -781,8 +916,116 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		try {
 			new ZipFile(archivePath.toFile()).extractAll(targetDir.toString());
 		} catch (Exception ex) {
+			if (isWrongPasswordError(ex)) {
+				throw new InvalidArchivePasswordException("Wrong password!", ex);
+			}
 			throw ex instanceof IOException ioEx ? ioEx : new IOException("Cannot extract ZIP", ex);
 		}
+	}
+
+	private void extractZip(Path archivePath, Path targetDir, char[] password) throws IOException {
+		try {
+			new ZipFile(archivePath.toFile(), password).extractAll(targetDir.toString());
+		} catch (Exception ex) {
+			if (isWrongPasswordError(ex)) {
+				throw new InvalidArchivePasswordException("Wrong password!", ex);
+			}
+			throw ex instanceof IOException ioEx ? ioEx : new IOException("Cannot extract ZIP", ex);
+		}
+	}
+
+	private Path extractEncryptedZipWithPrompt(Path archiveFile, Path originalArchivePath) throws IOException {
+		while (true) {
+			char[] password = promptForArchivePassword(originalArchivePath);
+			if (password == null) {
+				return null;
+			}
+			try {
+				return runExtractionWithProgressIfOnEdt(archiveFile, originalArchivePath, password);
+			} catch (InvalidArchivePasswordException ex) {
+				log.info("Invalid password for archive {}", originalArchivePath);
+				showArchivePasswordError(originalArchivePath);
+			} finally {
+				Arrays.fill(password, '\0');
+			}
+		}
+	}
+
+	/**
+	 * Extract the encrypted ZIP archive with {@code password}, showing a modal
+	 * "please wait" dialog when called from the EDT so the UI doesn't appear frozen.
+	 *
+	 * <p>When called from a background thread the extraction runs synchronously on
+	 * that thread — no dialog is needed because the EDT is already free.
+	 *
+	 * <p>The modal dialog uses Swing's secondary event loop ({@code setVisible(true)}
+	 * on an {@code APPLICATION_MODAL} dialog) to keep the EDT alive and responsive
+	 * while the background virtual thread does the actual I/O work.
+	 */
+	private Path runExtractionWithProgressIfOnEdt(
+			Path archiveFile,
+			Path originalArchivePath,
+			char[] password) throws IOException {
+
+		IOException[] errorHolder  = { null };
+		Path[]        resultHolder = { null };
+
+		Runnable doExtract = () -> {
+			try {
+				resultHolder[0] = extractToTempDir(archiveFile, originalArchivePath, "nuclr-zip-",
+						(src, target) -> extractZip(src, target, password));
+			} catch (IOException ex) {
+				errorHolder[0] = ex;
+			}
+		};
+
+		if (!SwingUtilities.isEventDispatchThread()) {
+			// We are already on a background thread — the EDT is free.
+			// Extract synchronously right here.
+			doExtract.run();
+		} else {
+			// We are on the EDT.  Run extraction on a virtual thread and show a
+			// modal dialog so the EDT keeps pumping events (secondary event loop).
+			JDialog waitDialog = buildExtractionWaitDialog();
+			AtomicBoolean done = new AtomicBoolean(false);
+
+			Thread.ofVirtual().start(() -> {
+				doExtract.run();
+				done.set(true);
+				// Dispose on the EDT to close the secondary event loop.
+				SwingUtilities.invokeLater(waitDialog::dispose);
+			});
+
+			// setVisible(true) blocks the EDT here via secondary event loop.
+			// It unblocks when waitDialog.dispose() is called above.
+			if (!done.get()) {
+				waitDialog.setVisible(true);
+			}
+		}
+
+		if (errorHolder[0] != null) {
+			throw errorHolder[0];
+		}
+		return resultHolder[0];
+	}
+
+	/**
+	 * Build the modal "Extracting Archive…" dialog shown while the extraction
+	 * virtual thread is running.  The dialog has no controls — the user must wait.
+	 */
+	private JDialog buildExtractionWaitDialog() {
+		Window owner = panel != null ? SwingUtilities.getWindowAncestor(panel) : null;
+		JDialog dialog = new JDialog(owner, "Extracting Archive", Dialog.ModalityType.APPLICATION_MODAL);
+		dialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
+
+		JLabel label = new JLabel("Decrypting and extracting, please wait\u2026");
+		label.setBorder(BorderFactory.createEmptyBorder(24, 32, 24, 32));
+		dialog.add(label, BorderLayout.CENTER);
+
+		dialog.pack();
+		dialog.setResizable(false);
+		dialog.setLocationRelativeTo(panel);
+		return dialog;
 	}
 
 	private void extractTar(Path archivePath, Path targetDir) throws IOException {
