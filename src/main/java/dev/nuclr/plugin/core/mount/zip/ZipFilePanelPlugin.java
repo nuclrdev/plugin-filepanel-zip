@@ -307,9 +307,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 	@Override
 	public List<NuclrResourcePath> getChangeDriveResources() {
-		List<NuclrResourcePath> roots = new ArrayList<>();
-		FileSystems.getDefault().getRootDirectories().forEach(p -> roots.add(toResource(p)));
-		return roots;
+		return List.of();
 	}
 
 	@Override
