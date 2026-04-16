@@ -52,10 +52,12 @@ import dev.nuclr.plugin.event.PluginClosePanelEvent;
 import dev.nuclr.plugin.event.PluginCopyEvent;
 import dev.nuclr.plugin.event.PluginMoveEvent;
 import dev.nuclr.plugin.event.PluginOpenItemEvent;
+import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import net.lingala.zip4j.ZipFile;
 import net.lingala.zip4j.exception.ZipException;
 
+@Data
 @Slf4j
 public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 

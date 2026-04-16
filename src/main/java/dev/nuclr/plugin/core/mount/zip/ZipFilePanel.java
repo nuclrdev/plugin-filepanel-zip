@@ -5,8 +5,6 @@ import java.awt.Component;
 import java.awt.Desktop;
 import java.awt.Font;
 import java.awt.Point;
-import java.awt.event.KeyAdapter;
-import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.IOException;
@@ -17,6 +15,7 @@ import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 
 import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
@@ -104,6 +103,15 @@ public class ZipFilePanel extends JPanel {
 		table.getSelectionModel().addListSelectionListener(e -> {
 			if (!e.getValueIsAdjusting()) {
 				updateStatus();
+				
+				final var eventBus = provider.getContext().getEventBus();
+				if (eventBus != null) {
+					Path selectedPath = getSelectedEntryPath();
+					if (selectedPath != null) {
+						eventBus.emit(ZipFilePanelPlugin.PLUGIN_ID, "fs.path.selected",
+								Map.of("path", selectedPath));
+					}
+				}						
 			}
 		});
 		table.addMouseListener(new MouseAdapter() {
@@ -228,7 +236,15 @@ public class ZipFilePanel extends JPanel {
 	// -------------------------------------------------------------------------
 	// Selection helpers
 	// -------------------------------------------------------------------------
+	private Path getSelectedEntryPath() {
+		int selectedRow = table.getSelectedRow();
+		if (selectedRow < 0) {
+			return null;
+		}
+		return model.getEntryAt(table.convertRowIndexToModel(selectedRow)).getPath();
+	}
 
+	
 	public NuclrResourcePath getSelectedResource() {
 		List<NuclrResourcePath> selected = getSelectedResources();
 		return selected.isEmpty() ? null : selected.get(0);
