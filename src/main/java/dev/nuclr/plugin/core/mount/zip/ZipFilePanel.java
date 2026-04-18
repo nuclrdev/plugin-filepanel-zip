@@ -233,6 +233,15 @@ public class ZipFilePanel extends JPanel {
 		return currentDirectory;
 	}
 
+	void refreshCurrentDirectoryAfterWrite() {
+		Path refreshedDirectory = provider.refreshArchiveDirectory(currentDirectory);
+		if (refreshedDirectory != null) {
+			showDirectory(refreshedDirectory);
+			return;
+		}
+		statusLabel.setText("Changes were applied, but the archive could not be refreshed.");
+	}
+
 	// -------------------------------------------------------------------------
 	// Selection helpers
 	// -------------------------------------------------------------------------
@@ -319,7 +328,7 @@ public class ZipFilePanel extends JPanel {
 		}
 		provider.getWriteService().createFolder(
 				currentDirectory, name.strip(), this,
-				() -> showDirectory(currentDirectory));
+				this::refreshCurrentDirectoryAfterWrite);
 	}
 
 	/** F8 / Delete: confirm then delete selected entries from the archive. */
@@ -341,7 +350,7 @@ public class ZipFilePanel extends JPanel {
 		}
 		provider.getWriteService().deleteEntries(
 				paths, this,
-				() -> showDirectory(currentDirectory));
+				this::refreshCurrentDirectoryAfterWrite);
 	}
 
 	/** Space: toggle the selection mark on the focused row without moving the cursor. */
@@ -441,12 +450,7 @@ public class ZipFilePanel extends JPanel {
 			return;
 		}
 
-		// Nested archive: push a new panel layer
-		if (entry.isArchive() && provider.pushArchivePanel(entry.getPath())) {
-			return;
-		}
-
-		// Regular directory or archive (push failed) — navigate inline
+		// Directories and nested archives are browsed inline inside this panel.
 		if (entry.isDirectory() || entry.isArchive()) {
 			Path browsable = provider.resolveBrowsablePath(entry.getPath());
 			if (browsable != null) {

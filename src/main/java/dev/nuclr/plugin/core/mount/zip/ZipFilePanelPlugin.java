@@ -125,6 +125,9 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	/** For each mounted ZIP filesystem, the real-filesystem path of the archive file. */
 	private final ConcurrentHashMap<FileSystem, Path> mountedArchiveSources = new ConcurrentHashMap<>();
 
+	/** For each mounted ZIP filesystem, the real file opened by the ZIP provider. */
+	private final ConcurrentHashMap<FileSystem, Path> mountedArchiveBackingFiles = new ConcurrentHashMap<>();
+
 	/**
 	 * Extracted temp directories for archives that cannot be mounted via NIO
 	 * (RAR, TAR, encrypted ZIP).  Key = temp dir, value = original archive path.
@@ -165,11 +168,16 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	}
 
 	private void closeMountedFileSystems() {
-		for (FileSystem fs : mountedFileSystems.values()) {
-			try { fs.close(); } catch (IOException ignored) { }
+		List<FileSystem> fileSystems = new ArrayList<>(mountedArchiveSources.keySet());
+		fileSystems.sort(Comparator.comparingInt(this::archiveDepth).reversed());
+		for (FileSystem fs : fileSystems) {
+			try {
+				closeMountedFileSystem(fs);
+			} catch (IOException ignored) { }
 		}
 		mountedFileSystems.clear();
 		mountedArchiveSources.clear();
+		mountedArchiveBackingFiles.clear();
 	}
 
 	private void deleteExtractedTempDirs() {
@@ -439,7 +447,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		}
 
 		writeService.addFiles(targetDir, sources, panel, () -> {
-			panel.showDirectory(targetDir);
+			panel.refreshCurrentDirectoryAfterWrite();
 			if (onSourceRefresh != null) {
 				onSourceRefresh.run();
 			}
@@ -623,6 +631,36 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	}
 
 	/**
+	 * Flush writes for the archive containing {@code directory} and remount it so the
+	 * returned path is backed by a live filesystem after a mutation.
+	 */
+	public Path refreshArchiveDirectory(Path directory) {
+		if (directory == null || directory.getFileSystem().equals(FileSystems.getDefault())) {
+			return directory;
+		}
+
+		FileSystem fileSystem = directory.getFileSystem();
+		Path archiveRoot = fileSystem.getPath("/");
+		Path relativePath = archiveRoot.relativize(directory);
+		Path archiveSource = mountedArchiveSources.get(fileSystem);
+		if (archiveSource == null) {
+			return directory;
+		}
+
+		try {
+			closeMountedFileSystem(fileSystem);
+			Path remountedRoot = resolveBrowsablePath(archiveSource);
+			if (remountedRoot == null) {
+				return null;
+			}
+			return resolveRelative(remountedRoot, relativePath);
+		} catch (IOException ex) {
+			log.error("Failed to refresh archive directory {}", directory, ex);
+			return null;
+		}
+	}
+
+	/**
 	 * Materialize a virtual-filesystem entry (e.g. a file inside a mounted ZIP)
 	 * as a real temp file so that {@code Desktop.open()} can open it.
 	 *
@@ -736,6 +774,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		}
 
 		mountedArchiveSources.put(newFs, originalArchivePath);
+		mountedArchiveBackingFiles.put(newFs, archiveFile);
 		return newFs.getPath("/");
 	}
 
@@ -747,6 +786,42 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		}
 		return extractToTempDir(archiveFile, originalArchivePath, "nuclr-archive-",
 				(src, target) -> extractArchive(src, type, target));
+	}
+
+	private int archiveDepth(FileSystem fileSystem) {
+		Path source = mountedArchiveSources.get(fileSystem);
+		if (source == null || source.getFileSystem().equals(FileSystems.getDefault())) {
+			return 0;
+		}
+		return 1 + archiveDepth(source.getFileSystem());
+	}
+
+	private void closeMountedFileSystem(FileSystem fileSystem) throws IOException {
+		if (fileSystem == null) {
+			return;
+		}
+
+		Path originalArchivePath = mountedArchiveSources.remove(fileSystem);
+		Path backingArchiveFile = mountedArchiveBackingFiles.remove(fileSystem);
+		mountedFileSystems.entrySet().removeIf(entry -> entry.getValue().equals(fileSystem));
+
+		if (fileSystem.isOpen()) {
+			fileSystem.close();
+		}
+
+		if (backingArchiveFile != null
+				&& originalArchivePath != null
+				&& !backingArchiveFile.equals(originalArchivePath)) {
+			Files.copy(backingArchiveFile, originalArchivePath, StandardCopyOption.REPLACE_EXISTING);
+		}
+	}
+
+	private Path resolveRelative(Path base, Path relative) {
+		Path result = base;
+		for (Path segment : relative) {
+			result = result.resolve(segment.toString());
+		}
+		return result;
 	}
 
 	@FunctionalInterface
