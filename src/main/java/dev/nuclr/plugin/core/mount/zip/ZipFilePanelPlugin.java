@@ -202,6 +202,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	public JComponent panel() {
 		if (panel == null) {
 			panel = new ZipFilePanel(this);
+			panel.setThemeScheme(context.getTheme());
 		}
 		return panel;
 	}
@@ -305,6 +306,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	@Override
 	public void updateTheme(NuclrThemeScheme themeScheme) {
 		if (panel != null) {
+			panel.setThemeScheme(themeScheme);
 			panel.repaint();
 		}
 	}

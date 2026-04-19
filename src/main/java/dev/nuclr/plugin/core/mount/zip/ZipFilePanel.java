@@ -1,6 +1,7 @@
 package dev.nuclr.plugin.core.mount.zip;
 
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.Desktop;
 import java.awt.Font;
@@ -15,6 +16,7 @@ import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import javax.swing.AbstractAction;
@@ -33,6 +35,7 @@ import javax.swing.UIManager;
 import javax.swing.border.Border;
 import javax.swing.table.DefaultTableCellRenderer;
 
+import dev.nuclr.platform.NuclrThemeScheme;
 import dev.nuclr.platform.plugin.NuclrResourcePath;
 
 /**
@@ -53,6 +56,7 @@ import dev.nuclr.platform.plugin.NuclrResourcePath;
 public class ZipFilePanel extends JPanel {
 
 	private static final long serialVersionUID = 1L;
+	private static final String FILE_HILIGHT_PREFIX = "file-hilight-";
 
 	final JTable table;
 	private final JLabel statusLabel;
@@ -60,11 +64,11 @@ public class ZipFilePanel extends JPanel {
 	private final ZipFilePanelModel model;
 	private final Border inactiveBorder;
 	private final Border activeBorder;
-	private final FileNameHighlighter fileNameHighlighter;
 	private final ZipFilePanelPlugin provider;
 
 	private Path currentDirectory;
 	private boolean selectTopOnFocus;
+	private NuclrThemeScheme themeScheme;
 
 	public ZipFilePanel(ZipFilePanelPlugin provider) {
 		this.provider = provider;
@@ -79,8 +83,6 @@ public class ZipFilePanel extends JPanel {
 								? UIManager.getColor("Table.selectionBackground")
 								: java.awt.Color.GRAY),
 				BorderFactory.createEmptyBorder(3, 3, 3, 3));
-		fileNameHighlighter = new FileNameHighlighter(table.getForeground());
-
 		setLayout(new BorderLayout(0, 4));
 		setBorder(inactiveBorder);
 
@@ -126,6 +128,40 @@ public class ZipFilePanel extends JPanel {
 		add(pathLabel, BorderLayout.NORTH);
 		add(new JScrollPane(table), BorderLayout.CENTER);
 		add(statusLabel, BorderLayout.SOUTH);
+	}
+
+	public void setThemeScheme(NuclrThemeScheme themeScheme) {
+		this.themeScheme = themeScheme;
+	}
+
+	private Color colorFor(ZipFilePanelModel.Entry entry) {
+		Color defaultColor = table.getForeground();
+		if (entry.isParent() || entry.isDirectory()) {
+			return defaultColor;
+		}
+		if (themeScheme == null) {
+			return defaultColor;
+		}
+		return themeScheme.color(fileHighlightKey(extensionOf(entry.getName())), defaultColor);
+	}
+
+	private static String fileHighlightKey(String extension) {
+		if (extension == null) {
+			return FILE_HILIGHT_PREFIX;
+		}
+		String normalized = extension.trim().toLowerCase(Locale.ROOT);
+		if (normalized.startsWith(".")) {
+			normalized = normalized.substring(1);
+		}
+		return FILE_HILIGHT_PREFIX + normalized;
+	}
+
+	private static String extensionOf(String name) {
+		int dot = name.lastIndexOf('.');
+		if (dot < 0 || dot == name.length() - 1) {
+			return "";
+		}
+		return name.substring(dot + 1).toLowerCase(Locale.ROOT);
 	}
 
 	// -------------------------------------------------------------------------
@@ -605,7 +641,7 @@ public class ZipFilePanel extends JPanel {
 			if (c instanceof JLabel label) {
 				label.setHorizontalAlignment(column == 1 ? SwingConstants.RIGHT : SwingConstants.LEFT);
 				if (!isSelected && column == 0 && panel != null) {
-					label.setForeground(panel.fileNameHighlighter.colorFor(entry));
+					label.setForeground(panel.colorFor(entry));
 				}
 			}
 			return c;
