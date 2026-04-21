@@ -7,6 +7,7 @@ import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.Charset;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -111,6 +112,10 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 	private static final Set<String> ZIP_FAMILY_EXTENSIONS =
 			Set.of(".zip", ".jar", ".war", ".ear");
+	private static final List<Charset> LEGACY_ZIP_NAME_CHARSETS = List.of(
+			Charset.forName("UTF-8"),
+			Charset.forName("CP866"),
+			Charset.forName("windows-1251"));
 
 	private static final Set<String> ALL_ARCHIVE_EXTENSIONS =
 			Set.of(".zip", ".jar", ".war", ".ear", ".rar", ".tar", ".gz", ".tgz");
@@ -776,8 +781,9 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 				if (existingRoot != null) {
 					return existingRoot;
 				}
+				Charset zipCharset = detectZipEntryCharset(archiveFile);
 				return extractToTempDir(archiveFile, originalArchivePath, "nuclr-zip-",
-						(src, target) -> extractZip(src, target));
+						(src, target) -> extractZip(src, target, zipCharset));
 			}
 			throw ex;
 		}
@@ -807,6 +813,75 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 			current = current.getCause();
 		}
 		return false;
+	}
+
+	private Charset detectZipEntryCharset(Path archivePath) {
+		Charset bestCharset = Charset.forName("UTF-8");
+		int bestScore = Integer.MIN_VALUE;
+
+		for (Charset charset : LEGACY_ZIP_NAME_CHARSETS) {
+			try {
+				ZipFile zipFile = configuredZipFile(archivePath, charset);
+				int score = scoreZipNames(zipFile.getFileHeaders());
+				if (score > bestScore) {
+					bestScore = score;
+					bestCharset = charset;
+				}
+			} catch (Exception ex) {
+				log.debug("Cannot inspect ZIP names with charset {}: {}", charset, ex.getMessage());
+			}
+		}
+
+		log.info("Using ZIP entry charset {} for {}", bestCharset, archivePath);
+		return bestCharset;
+	}
+
+	private int scoreZipNames(List<net.lingala.zip4j.model.FileHeader> fileHeaders) {
+		int score = 0;
+		for (net.lingala.zip4j.model.FileHeader header : fileHeaders) {
+			String name = header != null ? header.getFileName() : null;
+			if (name == null || name.isBlank()) {
+				score -= 5;
+				continue;
+			}
+			score += scoreName(name);
+		}
+		return score;
+	}
+
+	private int scoreName(String name) {
+		int score = 0;
+		for (int i = 0; i < name.length(); i++) {
+			char ch = name.charAt(i);
+			if (isCyrillic(ch)) {
+				score += 4;
+			} else if (Character.isLetterOrDigit(ch)) {
+				score += 1;
+			} else if (" ./_+-()[]{}".indexOf(ch) >= 0) {
+				score += 0;
+			} else if ("¤¬ßÑГ".indexOf(ch) >= 0) {
+				score -= 4;
+			} else if (Character.isISOControl(ch) || ch == '\uFFFD') {
+				score -= 6;
+			}
+		}
+		return score;
+	}
+
+	private boolean isCyrillic(char ch) {
+		return Character.UnicodeBlock.of(ch) == Character.UnicodeBlock.CYRILLIC;
+	}
+
+	private ZipFile configuredZipFile(Path archivePath, Charset charset) {
+		ZipFile zipFile = new ZipFile(archivePath.toFile());
+		zipFile.setCharset(charset);
+		return zipFile;
+	}
+
+	private ZipFile configuredZipFile(Path archivePath, char[] password, Charset charset) {
+		ZipFile zipFile = new ZipFile(archivePath.toFile(), password);
+		zipFile.setCharset(charset);
+		return zipFile;
 	}
 
 	private Path mountByExtraction(Path archiveFile, Path originalArchivePath, ArchiveType type) throws IOException {
@@ -887,7 +962,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 	private boolean isEncryptedZip(Path archivePath) {
 		try {
-			return new ZipFile(archivePath.toFile()).isEncrypted();
+			return configuredZipFile(archivePath, Charset.forName("UTF-8")).isEncrypted();
 		} catch (Exception ignored) {
 			return false;
 		}
@@ -1019,8 +1094,12 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	}
 
 	private void extractZip(Path archivePath, Path targetDir) throws IOException {
+		extractZip(archivePath, targetDir, Charset.forName("UTF-8"));
+	}
+
+	private void extractZip(Path archivePath, Path targetDir, Charset charset) throws IOException {
 		try {
-			new ZipFile(archivePath.toFile()).extractAll(targetDir.toString());
+			configuredZipFile(archivePath, charset).extractAll(targetDir.toString());
 		} catch (Exception ex) {
 			if (isWrongPasswordError(ex)) {
 				throw new InvalidArchivePasswordException("Wrong password!", ex);
@@ -1030,8 +1109,12 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	}
 
 	private void extractZip(Path archivePath, Path targetDir, char[] password) throws IOException {
+		extractZip(archivePath, targetDir, password, Charset.forName("UTF-8"));
+	}
+
+	private void extractZip(Path archivePath, Path targetDir, char[] password, Charset charset) throws IOException {
 		try {
-			new ZipFile(archivePath.toFile(), password).extractAll(targetDir.toString());
+			configuredZipFile(archivePath, password, charset).extractAll(targetDir.toString());
 		} catch (Exception ex) {
 			if (isWrongPasswordError(ex)) {
 				throw new InvalidArchivePasswordException("Wrong password!", ex);
@@ -1041,13 +1124,14 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	}
 
 	private Path extractEncryptedZipWithPrompt(Path archiveFile, Path originalArchivePath) throws IOException {
+		Charset zipCharset = detectZipEntryCharset(archiveFile);
 		while (true) {
 			char[] password = promptForArchivePassword(originalArchivePath);
 			if (password == null) {
 				return null;
 			}
 			try {
-				return runExtractionWithProgressIfOnEdt(archiveFile, originalArchivePath, password);
+				return runExtractionWithProgressIfOnEdt(archiveFile, originalArchivePath, password, zipCharset);
 			} catch (InvalidArchivePasswordException ex) {
 				log.info("Invalid password for archive {}", originalArchivePath);
 				showArchivePasswordError(originalArchivePath);
@@ -1071,7 +1155,8 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	private Path runExtractionWithProgressIfOnEdt(
 			Path archiveFile,
 			Path originalArchivePath,
-			char[] password) throws IOException {
+			char[] password,
+			Charset zipCharset) throws IOException {
 
 		IOException[] errorHolder  = { null };
 		Path[]        resultHolder = { null };
@@ -1079,7 +1164,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		Runnable doExtract = () -> {
 			try {
 				resultHolder[0] = extractToTempDir(archiveFile, originalArchivePath, "nuclr-zip-",
-						(src, target) -> extractZip(src, target, password));
+						(src, target) -> extractZip(src, target, password, zipCharset));
 			} catch (IOException ex) {
 				errorHolder[0] = ex;
 			}
