@@ -766,7 +766,21 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 			return existing.getPath("/");
 		}
 
-		FileSystem newFs = FileSystems.newFileSystem(uri, Map.of());
+		FileSystem newFs;
+		try {
+			newFs = FileSystems.newFileSystem(uri, Map.of());
+		} catch (IOException ex) {
+			if (shouldFallbackToZipExtraction(ex)) {
+				log.warn("Falling back to ZIP extraction for {}: {}", originalArchivePath, ex.getMessage());
+				Path existingRoot = findExtractedRoot(originalArchivePath);
+				if (existingRoot != null) {
+					return existingRoot;
+				}
+				return extractToTempDir(archiveFile, originalArchivePath, "nuclr-zip-",
+						(src, target) -> extractZip(src, target));
+			}
+			throw ex;
+		}
 
 		// Guard against a race: another thread may have mounted it first
 		FileSystem previous = mountedFileSystems.putIfAbsent(uri, newFs);
@@ -778,6 +792,21 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		mountedArchiveSources.put(newFs, originalArchivePath);
 		mountedArchiveBackingFiles.put(newFs, archiveFile);
 		return newFs.getPath("/");
+	}
+
+	private boolean shouldFallbackToZipExtraction(IOException error) {
+		Throwable current = error;
+		while (current != null) {
+			String message = current.getMessage();
+			if (message != null) {
+				String normalized = message.toLowerCase(Locale.ROOT);
+				if (normalized.contains("invalid cen header") || normalized.contains("bad entry name")) {
+					return true;
+				}
+			}
+			current = current.getCause();
+		}
+		return false;
 	}
 
 	private Path mountByExtraction(Path archiveFile, Path originalArchivePath, ArchiveType type) throws IOException {
