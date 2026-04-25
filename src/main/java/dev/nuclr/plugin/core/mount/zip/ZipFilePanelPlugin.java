@@ -383,7 +383,9 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		if (FS_COPY_EVENT.equals(type) && focused && panel != null) {
 			List<NuclrResourcePath> paths = extractResourceList(event, "paths");
 			if (!paths.isEmpty()) {
-				handleCopyIntoArchive(paths, null);
+				if (handleCopyIntoArchive(paths, null)) {
+					markAccepted(event);
+				}
 			}
 			return;
 		}
@@ -434,14 +436,14 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	 * filesystem (i.e. writes persist to the archive).  For extracted temp
 	 * directories (TAR, RAR) the operation is rejected with a status message.
 	 */
-	private void handleCopyIntoArchive(List<NuclrResourcePath> resources, Runnable onSourceRefresh) {
+	private boolean handleCopyIntoArchive(List<NuclrResourcePath> resources, Runnable onSourceRefresh) {
 		Path targetDir = panel.getCurrentDirectory();
 		if (targetDir == null) {
-			return;
+			return false;
 		}
 		if (!isWritableArchiveDirectory(targetDir)) {
 			log.info("Copy-into ignored: archive is read-only (extracted temp dir)");
-			return;
+			return false;
 		}
 
 		List<Path> sources = resources.stream()
@@ -450,7 +452,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 				.collect(Collectors.toList());
 
 		if (sources.isEmpty()) {
-			return;
+			return false;
 		}
 
 		writeService.addFiles(targetDir, sources, panel, () -> {
@@ -459,6 +461,13 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 				onSourceRefresh.run();
 			}
 		});
+		return true;
+	}
+
+	private static void markAccepted(Map<String, Object> event) {
+		if (event != null && event.get("accepted") instanceof AtomicBoolean accepted) {
+			accepted.set(true);
+		}
 	}
 
 	// =========================================================================
