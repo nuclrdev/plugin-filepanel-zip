@@ -44,15 +44,10 @@ import com.github.junrar.rarfile.FileHeader;
 
 import dev.nuclr.platform.NuclrThemeScheme;
 import dev.nuclr.platform.events.NuclrEventListener;
+import dev.nuclr.platform.plugin.FilePanelNuclrPlugin;
 import dev.nuclr.platform.plugin.NuclrMenuResource;
-import dev.nuclr.platform.plugin.NuclrPlugin;
 import dev.nuclr.platform.plugin.NuclrPluginContext;
-import dev.nuclr.platform.plugin.NuclrPluginRole;
 import dev.nuclr.platform.plugin.NuclrResourcePath;
-import dev.nuclr.plugin.event.PluginClosePanelEvent;
-import dev.nuclr.plugin.event.PluginCopyEvent;
-import dev.nuclr.plugin.event.PluginMoveEvent;
-import dev.nuclr.plugin.event.PluginOpenItemEvent;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import net.lingala.zip4j.ZipFile;
@@ -60,7 +55,7 @@ import net.lingala.zip4j.exception.ZipException;
 
 @Data
 @Slf4j
-public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
+public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListener {
 
 	private String uuid = java.util.UUID.randomUUID().toString();
 	
@@ -94,8 +89,6 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	// -------------------------------------------------------------------------
 
 	private static final String MENU_ACTION_EVENT_TYPE = "dev.nuclr.plugin.core.mount.zip.menuAction";
-	private static final String COPY_RESOURCES_EVENT   = "dev.nuclr.platform.resources.copy";
-	private static final String MOVE_RESOURCES_EVENT   = "dev.nuclr.platform.resources.move";
 	private static final String FS_COPY_EVENT          = "fs.copy";
 	private static final String FS_MOVE_EVENT          = "fs.move";
 	private static final String THEME_UPDATED_EVENT    = "dev.nuclr.platform.theme.updated";
@@ -142,23 +135,30 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	/** Temp files created to materialize virtual-filesystem entries for Desktop.open(). */
 	private final Set<Path> materializedTempFiles = ConcurrentHashMap.newKeySet();
 
-	private final ArchiveWriteService writeService = new ArchiveWriteService();
-
 	private NuclrPluginContext context;
-	private ZipFilePanel panel;
 	private boolean focused;
+	private NuclrResourcePath currentFolder;
 
 	// =========================================================================
 	// NuclrPlugin — lifecycle
 	// =========================================================================
 
 	@Override
-	public void load(NuclrPluginContext context, boolean template) {
+	public void preinit(NuclrPluginContext context) {
 		this.context = context;
-		if (!template) {
+		log.info("Archive panel plugin loaded");
+	}
+
+	@Override
+	public NuclrPluginContext getContext() {
+		return context;
+	}
+
+	@Override
+	public void init() {
+		if (context != null) {
 			context.getEventBus().subscribe(this);
 		}
-		log.info("Archive panel plugin loaded");
 	}
 
 	@Override
@@ -199,19 +199,6 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		materializedTempFiles.clear();
 	}
 
-	// =========================================================================
-	// NuclrPlugin — panel & metadata
-	// =========================================================================
-
-	@Override
-	public JComponent panel() {
-		if (panel == null) {
-			panel = new ZipFilePanel(this);
-			panel.setThemeScheme(context.getTheme());
-		}
-		return panel;
-	}
-
 	@Override
 	public String id()          { return PLUGIN_ID; }
 	@Override
@@ -231,13 +218,9 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	@Override
 	public String docUrl()      { return PLUGIN_DOC_URL; }
 	@Override
-	public Developer type()     { return Developer.Official; }
-	@Override
-	public int priority()       { return 0; }
+	public Developer developer() { return Developer.Official; }
 	@Override
 	public boolean singleton()  { return false; }
-	@Override
-	public NuclrPluginRole role() { return NuclrPluginRole.FilePanel; }
 
 	// =========================================================================
 	// NuclrPlugin — focus
@@ -246,18 +229,12 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	@Override
 	public boolean onFocusGained() {
 		focused = true;
-		if (panel != null) {
-			panel.setPluginFocused(true);
-		}
 		return true;
 	}
 
 	@Override
 	public void onFocusLost() {
 		focused = false;
-		if (panel != null) {
-			panel.setPluginFocused(false);
-		}
 	}
 
 	@Override
@@ -276,7 +253,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 	@Override
 	public boolean openResource(NuclrResourcePath resource, AtomicBoolean cancelled) {
-		panel(); // ensure panel is created
+		this.currentFolder = toResource(resource.getPath());
 		if (cancelled != null && cancelled.get()) {
 			unloadCurrentInstance();
 			return false;
@@ -284,21 +261,15 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		if (resource == null || resource.getPath() == null) {
 			unloadCurrentInstance();
 			return false;
-		}
+		} 
 		Path browsable = resolveBrowsablePath(resource.getPath());
 		if (browsable == null) {
 			unloadCurrentInstance();
 			return false;
 		}
-
-		// panel.showDirectory is a Swing call — must happen on the EDT.
-		// openResource may be called from a background thread by the Commander
-		// (the AtomicBoolean cancelled parameter is the tell), so we dispatch
-		// showDirectory to the EDT regardless of the current thread.
-		if (SwingUtilities.isEventDispatchThread()) {
-			panel.showDirectory(browsable);
-		} else {
-			SwingUtilities.invokeLater(() -> panel.showDirectory(browsable));
+		if (shouldExitArchive(resource, browsable)) {
+			unloadCurrentInstance();
+			return false;
 		}
 		return true;
 	}
@@ -310,20 +281,11 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 	@Override
 	public void updateTheme(NuclrThemeScheme themeScheme) {
-		if (panel != null) {
-			panel.setThemeScheme(themeScheme);
-			panel.repaint();
-		}
 	}
 
 	// =========================================================================
 	// NuclrPlugin — drive list & menu
 	// =========================================================================
-
-	@Override
-	public List<NuclrResourcePath> getChangeDriveResources() {
-		return List.of();
-	}
 
 	@Override
 	public List<NuclrMenuResource> menuItems(NuclrResourcePath source) {
@@ -340,11 +302,87 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	}
 
 	private NuclrMenuResource menu(String name, String keyStroke) {
-		ZipMenuResource item = new ZipMenuResource();
-		item.setName(name);
-		item.setKeyStroke(keyStroke);
-		item.setEventType(MENU_ACTION_EVENT_TYPE);
-		return item;
+		return new NuclrMenuResource(name, keyStroke, MENU_ACTION_EVENT_TYPE);
+	}
+
+	@Override
+	public PluginRoots getPluginRoots() {
+		return null; // no roots; this plugin only opens in response to user navigation into archives
+	}
+
+	@Override
+	public List<NuclrResourcePath> getChildrenForCurrentResource() {
+		Path directory = currentFolder != null ? currentFolder.getPath() : null;
+		if (directory == null || !Files.isDirectory(directory)) {
+			return List.of();
+		}
+		List<NuclrResourcePath> children = new ArrayList<>();
+		if (isArchiveRoot(directory)) {
+			NuclrResourcePath parentEntry = createArchiveRootParentResource(directory);
+			if (parentEntry != null) {
+				children.add(parentEntry);
+			}
+		}
+		try (var stream = Files.list(directory)) {
+			children.addAll(stream
+					.map(this::toResource)
+					.toList());
+			return children;
+		} catch (IOException ex) {
+			log.error("Failed to list children for resource: {}", currentFolder, ex);
+			return List.of();
+		}
+	}
+
+	@Override
+	public String getCurrentLocationDisplayText() {
+		Path currentPath = currentFolder != null ? currentFolder.getPath() : null;
+		if (currentPath == null) {
+			return " ";
+		}
+		Path archiveSource = getArchiveSource(currentPath);
+		if (archiveSource == null) {
+			return currentPath.toString();
+		}
+		Path archiveRoot = getArchiveRoot(currentPath);
+		if (archiveRoot == null || archiveRoot.equals(currentPath)) {
+			return archiveSource.toString();
+		}
+		Path relative = archiveRoot.relativize(currentPath);
+		String suffix = relative.toString().replace('\\', '/');
+		return suffix.isBlank() ? archiveSource.toString() : archiveSource + "/" + suffix;
+	}
+
+	@Override
+	public String getSelectionSummaryText(List<NuclrResourcePath> selectedResources) {
+		if (selectedResources == null || selectedResources.isEmpty()) {
+			return getCurrentLocationDisplayText();
+		}
+		if (selectedResources.size() == 1) {
+			NuclrResourcePath resource = selectedResources.get(0);
+			Path path = resource.getPath();
+			boolean directory = path != null && Files.isDirectory(path);
+			String type = directory ? "Folder" : humanReadableSize(sizeBytes(resource, directory));
+			String name = resource.getName() != null && !resource.getName().isBlank()
+					? resource.getName()
+					: path == null ? "" : path.getFileName() == null ? path.toString() : path.getFileName().toString();
+			return name + "  |  " + type;
+		}
+		long totalBytes = 0L;
+		int fileCount = 0;
+		int folderCount = 0;
+		for (NuclrResourcePath resource : selectedResources) {
+			Path path = resource.getPath();
+			if (path != null && Files.isDirectory(path)) {
+				folderCount++;
+			} else {
+				fileCount++;
+				totalBytes += sizeBytes(resource, false);
+			}
+		}
+		return "Bytes: " + humanReadableSize(totalBytes)
+				+ ",  files: " + fileCount
+				+ ",  folders: " + folderCount;
 	}
 
 	// =========================================================================
@@ -360,27 +398,17 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	public void handleMessage(Object source, String type, Map<String, Object> event) {
 
 		// Never process our own emissions
-		if (source == this || source == panel) {
+		if (source == this) {
 			return;
 		}
 
 		log.debug("handleMessage type={}", type);
 
 		// ------------------------------------------------------------------
-		// Theme update — always apply, regardless of focus
-		// ------------------------------------------------------------------
-		if (THEME_UPDATED_EVENT.equals(type)) {
-			if (panel != null) {
-				panel.repaint();
-			}
-			return;
-		}
-
-		// ------------------------------------------------------------------
 		// Incoming copy: the opposite panel wants to copy files into our
 		// current directory.  Only handle when we are the focused (target) panel.
 		// ------------------------------------------------------------------
-		if (FS_COPY_EVENT.equals(type) && focused && panel != null) {
+		if (FS_COPY_EVENT.equals(type) && focused) {
 			List<NuclrResourcePath> paths = extractResourceList(event, "paths");
 			if (!paths.isEmpty()) {
 				if (handleCopyIntoArchive(paths, null)) {
@@ -394,7 +422,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		// Incoming move: same as copy, but the source panel also deletes its
 		// files afterwards (handled by the source panel's move engine).
 		// ------------------------------------------------------------------
-		if (FS_MOVE_EVENT.equals(type) && focused && panel != null) {
+		if (FS_MOVE_EVENT.equals(type) && focused) {
 			List<NuclrResourcePath> paths = extractResourceList(event, "paths");
 			if (!paths.isEmpty()) {
 				// The source refresh callback is not passed through the event bus;
@@ -404,29 +432,6 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 			return;
 		}
 
-		// ------------------------------------------------------------------
-		// Menu action — only dispatch when focused and the event type matches
-		// ------------------------------------------------------------------
-		if (MENU_ACTION_EVENT_TYPE.equals(type) && focused) {
-			handleMenuAction(event);
-		}
-	}
-
-	private void handleMenuAction(Map<String, Object> event) {
-		if (event == null) {
-			return;
-		}
-		Object labelObj = event.get("label");
-		if (!(labelObj instanceof String label)) {
-			return;
-		}
-		switch (label) {
-			case "Copy"        -> emitCopyRequest(panel.getSelectedResources());
-			case "Move"        -> emitMoveRequest(panel.getSelectedResources());
-			case "Make Folder" -> { if (panel != null) panel.promptCreateFolder(); }
-			case "Delete"      -> { if (panel != null) panel.promptDeleteSelection(); }
-			default            -> log.debug("Unhandled menu action: {}", label);
-		}
 	}
 
 	/**
@@ -437,7 +442,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	 * directories (TAR, RAR) the operation is rejected with a status message.
 	 */
 	private boolean handleCopyIntoArchive(List<NuclrResourcePath> resources, Runnable onSourceRefresh) {
-		Path targetDir = panel.getCurrentDirectory();
+		Path targetDir = this.currentFolder.getPath();
 		if (targetDir == null) {
 			return false;
 		}
@@ -454,13 +459,14 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		if (sources.isEmpty()) {
 			return false;
 		}
-
+/*
 		writeService.addFiles(targetDir, sources, panel, () -> {
-			panel.refreshCurrentDirectoryAfterWrite();
+			refreshCurrentResourceAfterWrite();
 			if (onSourceRefresh != null) {
 				onSourceRefresh.run();
 			}
 		});
+		*/
 		return true;
 	}
 
@@ -483,8 +489,12 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		if (context == null || selectedResources.isEmpty()) {
 			return;
 		}
-		PluginCopyEvent copyEvent = new PluginCopyEvent(this, selectedResources);
-		context.getEventBus().emit(PLUGIN_ID, COPY_RESOURCES_EVENT, copyEvent.toEvent());
+		
+		AtomicBoolean accepted = new AtomicBoolean(false);
+		Map<String, Object> payload = new HashMap<>();
+		payload.put("paths", selectedResources);
+		payload.put("accepted", accepted);
+		context.getEventBus().emit(this, "fs.copy", payload);
 		log.info("Emitted copy request for {} item(s)", selectedResources.size());
 	}
 
@@ -497,8 +507,15 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		if (context == null || selectedResources.isEmpty()) {
 			return;
 		}
-		PluginMoveEvent moveEvent = new PluginMoveEvent(this, selectedResources);
-		context.getEventBus().emit(PLUGIN_ID, MOVE_RESOURCES_EVENT, moveEvent.toEvent());
+		
+		List<NuclrResourcePath> resources = selectedResources;
+		AtomicBoolean accepted = new AtomicBoolean(false);
+		Map<String, Object> payload = new HashMap<>();
+		payload.put("paths", resources);
+		payload.put("accepted", accepted);
+		// payload.put("refreshSource", (Runnable) this::refreshCurrentResourceAfterWrite);
+		context.getEventBus().emit(this, "fs.move", payload);
+		
 		log.info("Emitted move request for {} item(s)", selectedResources.size());
 	}
 
@@ -515,8 +532,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		if (context == null || !isArchivePath(archivePath)) {
 			return false;
 		}
-		PluginOpenItemEvent event = new PluginOpenItemEvent(this, toStackResource(archivePath));
-		context.getEventBus().emit("PluginOpenItemEvent", event.toEventData());
+		context.getEventBus().emit("fs.path.opened", Map.of("path", archivePath));
 		return true;
 	}
 
@@ -529,8 +545,8 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		if (context == null) {
 			return false;
 		}
-		Map<String, Object> event = new PluginClosePanelEvent(this).toEvent();
-		context.getEventBus().emit("PluginClosePanelEvent", event);
+		Path selectionPath = getArchiveSource(this.currentFolder.getPath());
+		context.getEventBus().emit("fs.path.closed", Map.of("uuid", uuid));
 		return true;
 	}
 
@@ -543,7 +559,13 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		if (context == null) {
 			return false;
 		}
-		context.getEventBus().emit(PLUGIN_UNLOAD_EVENT, Map.of("uuid", uuid));
+		Path selectionPath = getArchiveSource(this.currentFolder.getPath());
+		Map<String, Object> event = new HashMap<>();
+		event.put("uuid", uuid);
+		if (selectionPath != null) {
+			event.put("selectionPath", selectionPath);
+		}
+		context.getEventBus().emit(PLUGIN_UNLOAD_EVENT, event);
 		return true;
 	}
 
@@ -709,11 +731,6 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		return tempFile;
 	}
 
-	/** Expose the write service so {@link ZipFilePanel} can invoke it directly. */
-	ArchiveWriteService getWriteService() {
-		return writeService;
-	}
-
 	// =========================================================================
 	// Resource construction helpers
 	// =========================================================================
@@ -730,6 +747,64 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 			resource.setSizeBytes(0L);
 		}
 		return resource;
+	}
+
+	private NuclrResourcePath createArchiveRootParentResource(Path directory) {
+		Path archiveSource = getArchiveSource(directory);
+		if (archiveSource == null || archiveSource.getParent() == null) {
+			return null;
+		}
+		NuclrResourcePath resource = toResource(archiveSource.getParent());
+		resource.setName("..");
+		return resource;
+	}
+
+	private boolean shouldExitArchive(NuclrResourcePath resource, Path browsable) {
+
+		var currentDirectory = this.currentFolder.getPath();
+		
+		if (currentDirectory == null || !isArchiveRoot(currentDirectory)) {
+			return false;
+		}
+		Path archiveSource = getArchiveSource(currentDirectory);
+		if (archiveSource == null) {
+			return false;
+		}
+		Path archiveParent = archiveSource.getParent();
+		if (archiveParent == null) {
+			return false;
+		}
+		Path requestedPath = resource != null ? resource.getPath() : null;
+		return archiveParent.equals(browsable) && archiveParent.equals(requestedPath);
+	}
+
+	private static long sizeBytes(NuclrResourcePath resource, boolean directory) {
+		if (resource == null || directory) {
+			return 0L;
+		}
+		Path path = resource.getPath();
+		if (path != null) {
+			try {
+				return Files.size(path);
+			} catch (IOException ignored) {
+				// Fall back to the resource payload below.
+			}
+		}
+		return resource.getSizeBytes();
+	}
+
+	private static String humanReadableSize(long sizeBytes) {
+		if (sizeBytes < 1024) {
+			return sizeBytes + " B";
+		}
+		double value = sizeBytes;
+		String[] units = {"KB", "MB", "GB", "TB", "PB"};
+		int unitIndex = -1;
+		while (value >= 1024 && unitIndex < units.length - 1) {
+			value /= 1024;
+			unitIndex++;
+		}
+		return String.format(Locale.ROOT, unitIndex == 0 ? "%.0f %s" : "%.1f %s", value, units[unitIndex]);
 	}
 
 	/** Build a resource that carries the panel-stack metadata the Commander needs. */
@@ -1013,7 +1088,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 				@Override public void ancestorMoved(javax.swing.event.AncestorEvent e) { }
 			});
 			int choice = JOptionPane.showConfirmDialog(
-					panel,
+					null,
 					new Object[] { "Enter password for \"" + archiveName + "\":", passwordField },
 					"Archive Password",
 					JOptionPane.OK_CANCEL_OPTION,
@@ -1048,7 +1123,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 				: "archive";
 
 		Runnable showDialog = () -> JOptionPane.showMessageDialog(
-				panel,
+				null,
 				"Incorrect password for \"" + archiveName + "\". Please try again.",
 				"Wrong Password",
 				JOptionPane.ERROR_MESSAGE);
@@ -1214,8 +1289,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 	 * virtual thread is running.  The dialog has no controls — the user must wait.
 	 */
 	private JDialog buildExtractionWaitDialog() {
-		Window owner = panel != null ? SwingUtilities.getWindowAncestor(panel) : null;
-		JDialog dialog = new JDialog(owner, "Extracting Archive", Dialog.ModalityType.APPLICATION_MODAL);
+		JDialog dialog = new JDialog(null, "Extracting Archive", Dialog.ModalityType.APPLICATION_MODAL);
 		dialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
 
 		JLabel label = new JLabel("Decrypting and extracting, please wait\u2026");
@@ -1224,7 +1298,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 		dialog.pack();
 		dialog.setResizable(false);
-		dialog.setLocationRelativeTo(panel);
+		dialog.setLocationRelativeTo(null);
 		return dialog;
 	}
 
@@ -1418,7 +1492,7 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 
 	@Override
 	public NuclrResourcePath getCurrentResource() {
-		return this.panel.getCurrentResource();
+		return currentFolder;
 	}
 
 	@Override
