@@ -253,15 +253,14 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	@Override
 	public boolean openResource(NuclrResourcePath resource, AtomicBoolean cancelled) {
-		this.currentFolder = toResource(resource.getPath());
+		if (resource == null || resource.getPath() == null) {
+			unloadCurrentInstance();
+			return false;
+		}
 		if (cancelled != null && cancelled.get()) {
 			unloadCurrentInstance();
 			return false;
 		}
-		if (resource == null || resource.getPath() == null) {
-			unloadCurrentInstance();
-			return false;
-		} 
 		Path browsable = resolveBrowsablePath(resource.getPath());
 		if (browsable == null) {
 			unloadCurrentInstance();
@@ -271,6 +270,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			unloadCurrentInstance();
 			return false;
 		}
+		this.currentFolder = toResource(browsable);
 		return true;
 	}
 
@@ -760,7 +760,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	private boolean shouldExitArchive(NuclrResourcePath resource, Path browsable) {
-
+		if (this.currentFolder == null) {
+			return false;
+		}
 		var currentDirectory = this.currentFolder.getPath();
 		
 		if (currentDirectory == null || !isArchiveRoot(currentDirectory)) {
@@ -849,9 +851,21 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		URI uri = URI.create("jar:" + archiveFile.toUri());
 
-		// Reuse an already-mounted filesystem if available
+		// Reuse an already-open filesystem from this instance or any other (e.g. a
+		// stale instance that was never unloaded).  FileSystems.getFileSystem() lets
+		// us adopt a JVM-level mount without throwing FileSystemAlreadyExistsException.
 		FileSystem existing = mountedFileSystems.get(uri);
+		if (existing == null) {
+			try {
+				existing = FileSystems.getFileSystem(uri);
+			} catch (java.nio.file.FileSystemNotFoundException ignored) {
+				// Not mounted yet — will create below
+			}
+		}
 		if (existing != null && existing.isOpen()) {
+			mountedFileSystems.putIfAbsent(uri, existing);
+			mountedArchiveSources.putIfAbsent(existing, originalArchivePath);
+			mountedArchiveBackingFiles.putIfAbsent(existing, archiveFile);
 			return existing.getPath("/");
 		}
 
