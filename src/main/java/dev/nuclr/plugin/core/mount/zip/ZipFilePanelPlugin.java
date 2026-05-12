@@ -138,6 +138,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private NuclrPluginContext context;
 	private boolean focused;
 	private NuclrResourcePath currentFolder;
+	private volatile Thread shutdownHook;
 
 	// =========================================================================
 	// NuclrPlugin — lifecycle
@@ -159,12 +160,25 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (context != null) {
 			context.getEventBus().subscribe(this);
 		}
+		shutdownHook = Thread.ofVirtual().unstarted(() -> {
+			deleteExtractedTempDirs();
+			deleteMaterializedTempFiles();
+		});
+		Runtime.getRuntime().addShutdownHook(shutdownHook);
 	}
 
 	@Override
 	public void unload() {
 		if (context != null) {
 			context.getEventBus().unsubscribe(this);
+		}
+		Thread hook = shutdownHook;
+		if (hook != null) {
+			try {
+				Runtime.getRuntime().removeShutdownHook(hook);
+			} catch (IllegalStateException ignored) {
+				// JVM is already shutting down; the hook is running
+			}
 		}
 		closeMountedFileSystems();
 		deleteExtractedTempDirs();
@@ -320,6 +334,13 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (isArchiveRoot(directory)) {
 			NuclrResourcePath parentEntry = createArchiveRootParentResource(directory);
 			if (parentEntry != null) {
+				children.add(parentEntry);
+			}
+		} else {
+			Path parent = directory.getParent();
+			if (parent != null) {
+				NuclrResourcePath parentEntry = toResource(parent);
+				parentEntry.setName("..");
 				children.add(parentEntry);
 			}
 		}
@@ -545,7 +566,6 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (context == null) {
 			return false;
 		}
-		Path selectionPath = getArchiveSource(this.currentFolder.getPath());
 		context.getEventBus().emit("fs.path.closed", Map.of("uuid", uuid));
 		return true;
 	}
@@ -559,7 +579,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (context == null) {
 			return false;
 		}
-		Path selectionPath = getArchiveSource(this.currentFolder.getPath());
+		Path selectionPath = currentFolder != null ? getArchiveSource(currentFolder.getPath()) : null;
 		Map<String, Object> event = new HashMap<>();
 		event.put("uuid", uuid);
 		if (selectionPath != null) {
@@ -760,24 +780,19 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	private boolean shouldExitArchive(NuclrResourcePath resource, Path browsable) {
-		if (this.currentFolder == null) {
+		if (this.currentFolder == null || this.currentFolder.getPath() == null) {
 			return false;
 		}
-		var currentDirectory = this.currentFolder.getPath();
-		
-		if (currentDirectory == null || !isArchiveRoot(currentDirectory)) {
-			return false;
+		Path currentArchiveRoot = getArchiveRoot(this.currentFolder.getPath());
+		if (currentArchiveRoot == null) {
+			return false; // not inside any archive
 		}
-		Path archiveSource = getArchiveSource(currentDirectory);
-		if (archiveSource == null) {
-			return false;
+		if (browsable == null) {
+			return true;
 		}
-		Path archiveParent = archiveSource.getParent();
-		if (archiveParent == null) {
-			return false;
-		}
-		Path requestedPath = resource != null ? resource.getPath() : null;
-		return archiveParent.equals(browsable) && archiveParent.equals(requestedPath);
+		// Exit when the target path belongs to a different archive (or no archive)
+		Path browsableRoot = getArchiveRoot(browsable);
+		return !currentArchiveRoot.equals(browsableRoot);
 	}
 
 	private static long sizeBytes(NuclrResourcePath resource, boolean directory) {
