@@ -1,7 +1,11 @@
 package dev.nuclr.plugin.core.mount.zip;
 
+import java.io.IOException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -186,6 +190,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	private static ArchiveType archiveType(Path path) {
+		
 		if (path == null || path.getFileName() == null) {
 			return null;
 		}
@@ -242,8 +247,30 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	@Override
 	public NuclrResourceData openResource(NuclrResource resource, AtomicBoolean cancelled) {
-		// TODO Auto-generated method stub
+
+		Path path = resource.getMetadata(PATH_METADATA_KEY, null);
+
+		if (path != null && !isCancelled(cancelled)) {
+			ArchiveType type = archiveType(path);
+			if (type != null) {
+				return openArchive(path, type, resource, cancelled);
+			}
+		}
+		
 		return null;
+	}
+	
+	// Read only one directory level at a time
+	private List<Path> listDirectory(FileSystem fs, String dirPath) throws IOException {
+		try (DirectoryStream<Path> stream = Files.newDirectoryStream(fs.getPath(dirPath))) {
+			List<Path> entries = new ArrayList<>();
+			stream.forEach(entries::add);
+			return entries;
+		}
+	}
+
+	private NuclrResourceData openArchive(Path path, ArchiveType type, NuclrResource resource, AtomicBoolean cancelled) {
+		log.info("Opening archive: {}, type={}", path, type);
 	}
 
 	@Override
