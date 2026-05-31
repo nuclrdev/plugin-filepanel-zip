@@ -3,6 +3,7 @@ package dev.nuclr.plugin.core.mount.zip;
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -10,6 +11,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import dev.nuclr.platform.events.NuclrEventListener;
 import dev.nuclr.platform.plugin.FilePanelNuclrPlugin;
@@ -57,6 +60,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private boolean focused;
 	private NuclrResource currentFolder;
 	private volatile Thread shutdownHook;
+	private FileSystem fs;
 
 	// =========================================================================
 	// NuclrPlugin — lifecycle
@@ -86,6 +90,15 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (context != null) {
 			context.getEventBus().unsubscribe(this);
 		}
+		
+		if (fs != null) {
+			try {
+				fs.close();
+			} catch (IOException e) {
+				log.warn("Failed to close file system: {}", e.getMessage());
+			}
+		}
+		
 		Thread hook = shutdownHook;
 		if (hook != null) {
 			try {
@@ -175,18 +188,49 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	// =========================================================================
 	// NuclrPlugin — resource handling
 	// =========================================================================
+	
+	private boolean isArchive(NuclrResource resource) {
+		
+		// Main Archive file (e.g. .zip, .jar, .tar, etc.)
+		Path path = resource.getMetadata(PATH_METADATA_KEY, null);
+		
+		if (path != null
+				&& Files.isRegularFile(path)
+				&& Files.isReadable(path)
+				&& archiveType(path) != null) return true;
+
+		return false;
+	}
+	
+	private boolean isArchiveEntry(NuclrResource resource) {
+
+		// Internal archive entry (e.g. "file.zip!/path/inside/archive.txt")
+		var internalArchiveEntry = resource.getMetadata(PLUGIN_ID, false);
+
+		if (internalArchiveEntry != null) {
+			return true;
+		}
+		
+		return false;
+	}
 
 	@Override
 	public boolean supports(NuclrResource resource) {
+
 		if (resource == null) {
 			return false;
 		}
 
-		Path path = resource.getMetadata(PATH_METADATA_KEY, null);
-		return path != null
-				&& Files.isRegularFile(path)
-				&& Files.isReadable(path)
-				&& archiveType(path) != null;
+		if (isArchive(resource)) {
+ 			return true;
+		}
+
+		if (isArchiveEntry(resource)) {
+			return true;
+		}
+
+		return false;
+
 	}
 
 	private static ArchiveType archiveType(Path path) {
@@ -229,8 +273,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	@Override
 	public NuclrResource getCurrentResource() {
-		// TODO Auto-generated method stub
-		return null;
+		return this.currentFolder;
 	}
 
 	@Override
@@ -248,29 +291,81 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	@Override
 	public NuclrResourceData openResource(NuclrResource resource, AtomicBoolean cancelled) {
 
-		Path path = resource.getMetadata(PATH_METADATA_KEY, null);
-
-		if (path != null && !isCancelled(cancelled)) {
-			ArchiveType type = archiveType(path);
-			if (type != null) {
-				return openArchive(path, type, resource, cancelled);
+		// Open main archive file, show root entries
+		if (isArchive(resource)) {
+			
+			Path path = resource.getMetadata(PATH_METADATA_KEY, null);
+			
+			if (path != null && !isCancelled(cancelled)) {
+				
+				ArchiveType type = archiveType(path);
+				
+				if (type != null) {
+					this.currentFolder = resource;
+					return openArchive(path, type, resource, cancelled);
+				}
+				
 			}
+			
 		}
 		
+		
+		
+		this.currentFolder = null;
 		return null;
 	}
-	
-	// Read only one directory level at a time
-	private List<Path> listDirectory(FileSystem fs, String dirPath) throws IOException {
-		try (DirectoryStream<Path> stream = Files.newDirectoryStream(fs.getPath(dirPath))) {
-			List<Path> entries = new ArrayList<>();
-			stream.forEach(entries::add);
-			return entries;
-		}
-	}
 
-	private NuclrResourceData openArchive(Path path, ArchiveType type, NuclrResource resource, AtomicBoolean cancelled) {
-		log.info("Opening archive: {}, type={}", path, type);
+	private NuclrResourceData openArchive(Path zipPath, ArchiveType type, NuclrResource resource, AtomicBoolean cancelled) {
+		
+		log.info("Opening archive: {}, type={}", zipPath, type);
+		
+		var data = new NuclrResourceData();
+		
+		data.setColumnNames(List.of("Name", "Size", "Date", "Time"));
+		
+		// Parent folder (will be opened by filepanel-fs plugin)
+		var parent = ZipFileNuclrResource.build(zipPath.getParent());
+		parent.setParent(true);
+		parent.setName("..");
+		parent.setFullPath("..");
+		parent.getMetadata().put(PATH_METADATA_KEY, zipPath.getParent());
+		parent.getColumnValues().set(0, "..");
+		data.getEntries().add(parent);		
+		
+		try {
+
+			fs = FileSystems.newFileSystem(zipPath);
+
+			Path root = fs.getPath("/");
+
+			try (Stream<Path> stream = Files.list(root)) {
+
+				var list = stream
+					.map(p -> convert(p))
+					.map(p->{
+						p.getMetadata().put(ZipFileNuclrResource.KeyPath, p);
+						return p;
+					})
+					.collect(Collectors.toList());
+
+				data.getEntries().addAll(list);
+
+			} catch (Exception e) {
+				log.error("Failed to read entries from archive {}: {}", zipPath, e.getMessage());
+			}
+
+		} catch (Exception e) {
+			log.error("Failed to open archive {}: {}", zipPath, e.getMessage());
+		}
+		
+		return data;
+		
+	}
+	
+	private NuclrResource convert(Path p) {
+		var r = ZipFileNuclrResource.build(p);
+		r.getMetadata().put(PLUGIN_ID, true);
+		return r;
 	}
 
 	@Override
