@@ -307,21 +307,38 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 				
 			}
 			
+		} 
+		
+		// Archive entry
+		if (isArchiveEntry(resource)) {
+			this.currentFolder = resource;
+			return openArchiveEntry(resource, cancelled);
 		}
 		
-		
-		
 		this.currentFolder = null;
+		
 		return null;
+		
 	}
+
+	private NuclrResourceData openArchiveEntry(NuclrResource resource, AtomicBoolean cancelled) {
+		
+		var path = resource.getMetadata(ZipFileNuclrResource.KeyPath, null);
+		
+		log.info("Opening archive entry: {}", path);
+		
+		return new NuclrResourceData(); // TODO: implement this
+		
+	}
+	
+	private static List<String> ColumnNames = List.of("Name", "Size", "Date", "Time");
 
 	private NuclrResourceData openArchive(Path zipPath, ArchiveType type, NuclrResource resource, AtomicBoolean cancelled) {
 		
 		log.info("Opening archive: {}, type={}", zipPath, type);
 		
 		var data = new NuclrResourceData();
-		
-		data.setColumnNames(List.of("Name", "Size", "Date", "Time"));
+		data.setColumnNames(ColumnNames);
 		
 		// Parent folder (will be opened by filepanel-fs plugin)
 		var parent = ZipFileNuclrResource.build(zipPath.getParent());
@@ -365,6 +382,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private NuclrResource convert(Path p) {
 		var r = ZipFileNuclrResource.build(p);
 		r.getMetadata().put(PLUGIN_ID, true);
+		r.getMetadata().put(ZipFileNuclrResource.KeyPath, p);
 		return r;
 	}
 
