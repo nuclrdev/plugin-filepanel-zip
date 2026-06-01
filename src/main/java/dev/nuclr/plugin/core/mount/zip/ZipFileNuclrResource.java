@@ -38,11 +38,12 @@ final class ZipFileNuclrResource {
 	public static NuclrResource build(final Path path) {
 
 		final var r = new NuclrResource();
+		r.getMetadata().put(KeyPath, path);
 
 		try {
 			r.setName(path.getFileName().toString());
 		} catch (Exception e) {
-			r.setName(path.toString());
+			r.setName(path == null ? "" : path.toString());
 		}
 		
 		r.setFullPath(getFullPath(path));

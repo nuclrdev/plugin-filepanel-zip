@@ -9,8 +9,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.concurrent.ConcurrentHashMap;
 
 import dev.nuclr.platform.events.NuclrEventListener;
 import dev.nuclr.platform.plugin.FilePanelNuclrPlugin;
@@ -33,7 +32,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	public static final String PLUGIN_ID = "dev.nuclr.plugin.core.mount.zip";
 	private static final String PLUGIN_NAME = "Archive Panel";
 	private static final String PLUGIN_VERSION = "1.0.0";
-	private static final String PLUGIN_DESCRIPTION = "Browse ZIP, JAR, WAR, EAR, RAR, TAR and GZ archives in the file panel.";
+	private static final String PLUGIN_DESCRIPTION = "Browse ZIP, JAR, WAR and EAR archives in the file panel.";
 	private static final String PLUGIN_AUTHOR = "Nuclr Development Team";
 	private static final String PLUGIN_LICENSE = "Apache-2.0";
 	private static final String PLUGIN_WEBSITE = "https://nuclr.dev";
@@ -56,6 +55,11 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private NuclrResource currentFolder;
 	private volatile Thread shutdownHook;
 	private FileSystem fs;
+	private Path archivePath;
+
+	private static final List<String> ColumnNames = List.of("Name", "Size", "Date", "Time");
+
+	private final Map<String, NuclrResourceData> archiveDataCache = new ConcurrentHashMap<>();
 
 	// =========================================================================
 	// NuclrPlugin — lifecycle
@@ -77,7 +81,14 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (context != null) {
 			context.getEventBus().subscribe(this);
 		}
-		Runtime.getRuntime().addShutdownHook(shutdownHook);
+		if (shutdownHook == null) {
+			shutdownHook = new Thread(this::closeFileSystem, PLUGIN_ID + "-shutdown");
+			try {
+				Runtime.getRuntime().addShutdownHook(shutdownHook);
+			} catch (IllegalStateException ignored) {
+				// JVM is already shutting down.
+			}
+		}
 	}
 
 	@Override
@@ -85,15 +96,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (context != null) {
 			context.getEventBus().unsubscribe(this);
 		}
-		
-		if (fs != null) {
-			try {
-				fs.close();
-			} catch (IOException e) {
-				log.warn("Failed to close file system: {}", e.getMessage());
-			}
-		}
-		
+
+		closeFileSystem();
+
 		Thread hook = shutdownHook;
 		if (hook != null) {
 			try {
@@ -101,6 +106,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			} catch (IllegalStateException ignored) {
 				// JVM is already shutting down; the hook is running
 			}
+			shutdownHook = null;
 		}
 		log.info("Archive panel plugin unloaded");
 	}
@@ -183,16 +189,18 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	// =========================================================================
 	// NuclrPlugin — resource handling
 	// =========================================================================
-	
+
 	private boolean isArchive(NuclrResource resource) {
-		
+
 		// Main Archive file (e.g. .zip, .jar, .tar, etc.)
 		Path path = resource.getMetadata(Path, null);
-		
+		ArchiveType type = archiveType(path);
+
 		if (path != null
 				&& Files.isRegularFile(path)
 				&& Files.isReadable(path)
-				&& archiveType(path) != null) return true;
+				&& type != null
+				&& type.usesNioZipFilesystem()) return true;
 
 		return false;
 	}
@@ -224,13 +232,15 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	}
 
-	private static ArchiveType archiveType(Path path) {
+	private ArchiveType archiveType(Path path) {
 		
 		if (path == null || path.getFileName() == null) {
 			return null;
 		}
 
-		String fileName = path.getFileName().toString().toLowerCase(Locale.ROOT);
+		Locale locale = context == null || context.getLocale() == null ? Locale.ROOT : context.getLocale();
+		String fileName = path.getFileName().toString().toLowerCase(locale);
+
 		if (fileName.endsWith(".zip") || fileName.endsWith(".jar") || fileName.endsWith(".war")
 				|| fileName.endsWith(".ear")) {
 			return ArchiveType.ZIP_FAMILY;
@@ -258,8 +268,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	@Override
 	public void closeResource() {
-		// TODO Auto-generated method stub
-		
+		closeFileSystem();
+		currentFolder = null;
 	}
 
 	@Override
@@ -280,111 +290,159 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	@Override
-	public NuclrResourceData openResource(NuclrResource resource, AtomicBoolean cancelled) {
+	public NuclrResourceData openResource(NuclrResource parent, NuclrResource resource, AtomicBoolean cancelled) {
+
+		if (isCancelled(cancelled) || resource == null) {
+			return null;
+		}
 
 		// Open main archive file, show root entries
 		if (isArchive(resource)) {
-			
 			Path path = resource.getMetadata(Path, null);
-			
-			if (path != null && !isCancelled(cancelled)) {
-				
-				ArchiveType type = archiveType(path);
-				
-				if (type != null) {
-					this.currentFolder = resource;
-					return openArchive(path, type, resource, cancelled);
-				}
-				
+			ArchiveType type = archiveType(path);
+
+			if (type == null || !type.usesNioZipFilesystem()) {
+				log.warn("Archive type is not supported by the current file-system mount path: {}", path);
+				return null;
 			}
-			
-		} 
-		
+
+			if (!path.equals(archivePath)) {
+				closeFileSystem();
+				archivePath = path;
+			}
+
+			if (fs == null || false == fs.isOpen()) {
+				try {
+					fs = FileSystems.newFileSystem(path);
+					archiveDataCache.clear();
+				} catch (IOException e) {
+					log.error("Failed to open archive {}: {}", path, e.getMessage());
+					return null;
+				}
+			}
+
+			return openArchiveEntry(resource, "/", cancelled);
+
+		}
+
 		// Archive entry
 		if (isArchiveEntry(resource)) {
-			this.currentFolder = resource;
-			return openArchiveEntry(resource, cancelled);
+			Path entryPath = resource.getMetadata(ZipFileNuclrResource.KeyPath, null);
+			String fullPath = entryPath == null ? resource.getFullPath() : entryPath.toString();
+			return openArchiveEntry(resource, fullPath, cancelled);
 		}
 		
 		this.currentFolder = null;
-		
 		return null;
-		
+
 	}
 
-	private NuclrResourceData openArchiveEntry(NuclrResource resource, AtomicBoolean cancelled) {
-		
-		Path path = resource.getMetadata(ZipFileNuclrResource.KeyPath, null);
-		
-		log.info("Opening archive entry: {}", path);
-		
-		// .. Parent
-		
-		var data = new NuclrResourceData();
-		data.setColumnNames(ColumnNames);
-		
-		// Parent folder (will be opened by filepanel-fs plugin)
-		var parent = ZipFileNuclrResource.build(path);
-		parent.setParent(true);
-		parent.setName("..");
-		parent.setFullPath("..");
-		parent.getMetadata().put(Path, path.getParent());
-		parent.getColumnValues().set(0, "..");
-		data.getEntries().add(parent);		
-		
-		return data;
-		
-	}
-	
-	private static List<String> ColumnNames = List.of("Name", "Size", "Date", "Time");
+	private NuclrResourceData openArchiveEntry(NuclrResource resource, String entryPath, AtomicBoolean cancelled) {
 
-	private NuclrResourceData openArchive(Path zipPath, ArchiveType type, NuclrResource resource, AtomicBoolean cancelled) {
-		
-		log.info("Opening archive: {}, type={}", zipPath, type);
-		
-		var data = new NuclrResourceData();
-		data.setColumnNames(ColumnNames);
-		
-		// Parent folder (will be opened by filepanel-fs plugin)
-		var parent = ZipFileNuclrResource.build(zipPath.getParent());
-		parent.setParent(true);
-		parent.setName("..");
-		parent.setFullPath("..");
-		parent.getMetadata().put(Path, zipPath.getParent());
-		parent.getColumnValues().set(0, "..");
-		data.getEntries().add(parent);		
-		
-		try {
-
-			fs = FileSystems.newFileSystem(zipPath);
-
-			Path root = fs.getPath("/");
-
-			try (Stream<Path> stream = Files.list(root)) {
-
-				var list = stream
-					.map(p -> convert(p))
-					.collect(Collectors.toList());
-
-				data.getEntries().addAll(list);
-
-			} catch (Exception e) {
-				log.error("Failed to read entries from archive {}: {}", zipPath, e.getMessage());
-			}
-
-		} catch (Exception e) {
-			log.error("Failed to open archive {}: {}", zipPath, e.getMessage());
+		if (isCancelled(cancelled) || fs == null || !fs.isOpen()) {
+			return null;
 		}
-		
+
+		Path path = fs.getPath(entryPath == null || entryPath.isBlank() ? "/" : entryPath).normalize();
+		if (!Files.isDirectory(path)) {
+			return null;
+		}
+
+		String cacheKey = cacheKey(path);
+		if (archiveDataCache.containsKey(cacheKey)) {
+			log.info("Using cached data for archive entry: {}", cacheKey);
+			return archiveDataCache.get(cacheKey);
+		}
+
+		log.info("Opening archive entry: {}", cacheKey);
+
+		var data = new NuclrResourceData();
+		data.setColumnNames(ColumnNames);
+
+		addParentEntry(data, path);
+
+		try (var stream = Files.list(path)) {
+			stream.forEach(p -> {
+				if (!isCancelled(cancelled)) {
+					data.getEntries().add(convert(p));
+				}
+			});
+		} catch (IOException e) {
+			log.error("Failed to read entries from archive {} at {}: {}", archivePath, cacheKey, e.getMessage());
+		}
+
+		archiveDataCache.put(cacheKey, data);
+
+		this.currentFolder = resource;
+
 		return data;
-		
+
 	}
-	
+
 	private NuclrResource convert(Path p) {
 		var r = ZipFileNuclrResource.build(p);
 		r.getMetadata().put(PLUGIN_ID, true);
 		r.getMetadata().put(ZipFileNuclrResource.KeyPath, p);
+		r.setFullPath(cacheKey(p));
+		r.setUuid(archivePath + "!" + cacheKey(p));
 		return r;
+	}
+
+	private void addParentEntry(NuclrResourceData data, Path path) {
+		if (isRoot(path)) {
+			Path parentPath = archivePath == null ? null : archivePath.getParent();
+			if (parentPath != null) {
+				NuclrResource parent = ZipFileNuclrResource.build(parentPath);
+				parent.setParent(true);
+				parent.setName("..");
+				parent.setFullPath("..");
+				parent.getMetadata().remove(ZipFileNuclrResource.KeyPath);
+				parent.getMetadata().put(Path, parentPath);
+				parent.getColumnValues().set(0, "..");
+				data.getEntries().add(parent);
+			}
+			return;
+		}
+
+		Path parentPath = path.getParent();
+		if (parentPath == null) {
+			parentPath = fs.getPath("/");
+		}
+
+		NuclrResource parent = ZipFileNuclrResource.build(parentPath);
+		parent.setParent(true);
+		parent.setName("..");
+		parent.setFullPath("..");
+		parent.getMetadata().put(PLUGIN_ID, true);
+		parent.getMetadata().put(ZipFileNuclrResource.KeyPath, parentPath);
+		parent.getColumnValues().set(0, "..");
+		data.getEntries().add(parent);
+	}
+
+	private static boolean isRoot(Path path) {
+		return path != null && path.getParent() == null;
+	}
+
+	private static String cacheKey(Path path) {
+		String value = path == null ? "/" : path.toString().replace('\\', '/');
+		if (value.isBlank()) {
+			return "/";
+		}
+		return value.startsWith("/") ? value : "/" + value;
+	}
+
+	private void closeFileSystem() {
+		FileSystem current = fs;
+		fs = null;
+		archivePath = null;
+		archiveDataCache.clear();
+		if (current != null && current.isOpen()) {
+			try {
+				current.close();
+			} catch (IOException e) {
+				log.warn("Failed to close file system: {}", e.getMessage());
+			}
+		}
 	}
 
 	@Override
@@ -394,8 +452,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	@Override
 	public String getCurrentLocationDisplayText() {
-		// TODO Auto-generated method stub
-		return null;
+		return currentFolder == null ? "" : currentFolder.getFullPath();
 	}
 
 	@Override
