@@ -78,8 +78,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	static final List<String> ColumnNames = List.of("Name", "Size", "Date", "Time");
 
-	/** Commander event emitted to pop the current panel layer (see {@code Events}). */
-	private static final String EventFilePanelPathClosed = "filepanel.path.closed";
+	/** Commander event emitted to unload this panel layer (see {@code Events}). */
+	private static final String EventPluginUnload = "plugin.unload";
 
 	// -------------------------------------------------------------------------
 	// Runtime state — one instance backs one mounted/extracted archive
@@ -108,6 +108,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	/** The temp directory an archive was extracted into, or {@code null}. */
 	private Path extractedTempDir;
+
+	/** Set once the root parent entry requests this panel to close. */
+	private boolean closing;
 
 	/** Temp files created when materialising nested archives, for cleanup. */
 	private final List<Path> materializedTempFiles = new CopyOnWriteArrayList<>();
@@ -181,8 +184,11 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		// Synthetic ".." at the archive root: close the archive and pop the panel.
 		if (resourceToOpen.getMetadata(ArchiveNuclrResource.KeyCloseArchive, Boolean.FALSE)) {
+			closing = true;
 			emitArchiveClosed();
-			return emptyData();
+			resourceToOpen.getMetadata().remove(ArchiveNuclrResource.KeyCloseArchive);
+			resourceToOpen.setPath(null);
+			return null;
 		}
 
 		final Path target = resourceToOpen.getPath();
@@ -229,6 +235,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		this.archiveRootPath = root;
 		this.archiveDisplayName = target.getFileName() != null ? target.getFileName().toString() : target.toString();
 		this.currentFolder = ArchiveNuclrResource.buildRoot(root, archiveDisplayName);
+		this.closing = false;
 
 		return listDirectory(currentFolder, root);
 	}
@@ -362,12 +369,6 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		return data;
 	}
 
-	private NuclrResourceData emptyData() {
-		final var data = new NuclrResourceData();
-		data.setColumnNames(ColumnNames);
-		return data;
-	}
-
 	// =========================================================================
 	// Events
 	// =========================================================================
@@ -378,7 +379,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			return;
 		}
 		log.info("Closing archive panel for {}", archiveDisplayName);
-		context.getEventBus().emit(this, EventFilePanelPathClosed, Map.of("uuid", uuid));
+		context.getEventBus().emit(this, EventPluginUnload, Map.of("uuid", uuid, "selectionResource", archiveFile));
 	}
 
 	@Override
@@ -404,7 +405,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		// The root ".." that exits the archive must route back to openResource.
 		if (resource.getMetadata(ArchiveNuclrResource.KeyCloseArchive, Boolean.FALSE)) {
-			return true;
+			return !closing;
 		}
 
 		final Path path = resource.getPath();
