@@ -419,8 +419,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			return true;
 		}
 
-		// Entering an archive file (from a regular panel or a nested archive).
-		return ArchiveType.isArchiveFile(path);
+		// Archive files inside an already-open archive must be routed through
+		// Commander so they get their own plugin instance and stack entry.
+		return archiveRootPath == null && ArchiveType.isArchiveFile(path);
 	}
 
 	// =========================================================================
