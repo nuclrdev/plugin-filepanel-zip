@@ -17,6 +17,7 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.file.FileSystem;
@@ -38,6 +39,8 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPasswordField;
 import javax.swing.SwingUtilities;
+
+import org.apache.commons.io.FilenameUtils;
 
 import dev.nuclr.platform.events.NuclrEventListener;
 import dev.nuclr.platform.plugin.FilePanelNuclrPlugin;
@@ -427,22 +430,26 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	public NuclrResource getCurrentResource() {
 		return currentFolder;
 	}
+	
+	@Override
+	public String getWindowTitle() {
+		
+		if (this.getCurrentResource()!=null && this.getCurrentResource().getPath()!=null) {
+			var sb = new StringBuilder();
+			sb.append(archiveFile.toAbsolutePath().toString());
+			sb.append(this.getCurrentResource().getPath().toAbsolutePath().toString());
+			var title = sb.toString();
+			title = FilenameUtils.normalize(title);
+			return title;
+		}
+
+		return getCurrentLocationDisplayText();
+		
+	}
 
 	@Override
 	public String getCurrentLocationDisplayText() {
-
-		if (currentFolder == null) {
-			return archiveDisplayName != null ? archiveDisplayName : "";
-		}
-
-		final Path path = currentFolder.getPath();
-
-		if (path == null || archiveRootPath == null) {
-			return archiveDisplayName != null ? archiveDisplayName : currentFolder.getName();
-		}
-
-		final String inside = relativeInsideArchive(path);
-		return inside.isEmpty() ? archiveDisplayName : archiveDisplayName + "/" + inside;
+		return getWindowTitle();
 	}
 
 	private String relativeInsideArchive(Path path) {
