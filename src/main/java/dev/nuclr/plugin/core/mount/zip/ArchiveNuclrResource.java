@@ -24,7 +24,13 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
+import java.util.Locale;
 
+import org.apache.commons.io.FileUtils;
+
+import dev.nuclr.platform.plugin.NuclrPluginContext;
 import dev.nuclr.platform.plugin.NuclrResource;
 import lombok.extern.slf4j.Slf4j;
 
@@ -40,9 +46,6 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 final class ArchiveNuclrResource {
 
-	/** Metadata key holding the backing {@link Path}. Matches the local FS plugin. */
-	public static final String KeyPath = "Path";
-
 	/**
 	 * Metadata key marking the synthetic {@code ".."} entry that closes the
 	 * archive (used at the archive root to pop the panel layer).
@@ -53,9 +56,9 @@ final class ArchiveNuclrResource {
 	}
 
 	/** Build a resource describing a path inside an archive. */
-	public static NuclrResource build(final Path path) {
+	public static FileNuclrResource build(NuclrPluginContext ctx, final Path path) {
 
-		final var r = new NuclrResource(path);
+		final var r = new FileNuclrResource(ctx, path);
 
 		try {
 			final var fileName = path.getFileName();
@@ -72,7 +75,7 @@ final class ArchiveNuclrResource {
 		r.setCreatedDateTime(getCreateDateTime(path));
 		r.setLastAccessDateTime(getLastAccessDateTime(path));
 
-		addColumnValues(r);
+		addColumnValues(ctx, r);
 
 		return r;
 	}
@@ -81,11 +84,10 @@ final class ArchiveNuclrResource {
 	 * Build the resource shown for the archive root. Uses the original archive
 	 * file name as the display name (the NIO root path has no file name).
 	 */
-	public static NuclrResource buildRoot(final Path rootPath, final String displayName) {
-		final var r = build(rootPath);
+	public static FileNuclrResource buildRoot(NuclrPluginContext ctx, final Path rootPath, final String displayName) {
+		final var r = build(ctx, rootPath);
 		r.setName(displayName);
 		r.setFolder(true);
-		r.getColumnValues().set(0, displayName);
 		return r;
 	}
 
@@ -93,11 +95,10 @@ final class ArchiveNuclrResource {
 	 * Build the {@code ".."} entry that navigates up to {@code parentPath} inside
 	 * the archive.
 	 */
-	public static NuclrResource buildParent(final Path parentPath) {
-		final var r = build(parentPath);
+	public static FileNuclrResource buildParent(NuclrPluginContext ctx, final Path parentPath) {
+		final var r = build(ctx, parentPath);
 		r.setFolder(true);
 		r.setName("..");
-		r.getColumnValues().set(0, r.getName());
 		return r;
 	}
 
@@ -105,9 +106,10 @@ final class ArchiveNuclrResource {
 	 * Build the {@code ".."} entry shown at the archive root: opening it closes
 	 * the archive and pops the panel layer rather than navigating.
 	 */
-	public static NuclrResource buildCloseParent(final Path archiveFile) {
-		final var r = new NuclrResource(archiveFile);
+	public static FileNuclrResource buildCloseParent(NuclrPluginContext ctx, Path archiveFile) {
+		final var r = new FileNuclrResource(ctx, archiveFile);
 		r.getMetadata().put(KeyCloseArchive, Boolean.TRUE);
+		r.setPath(null);
 		r.setFolder(true);
 		r.setName("..");
 		r.setFullPath("..");
@@ -115,17 +117,35 @@ final class ArchiveNuclrResource {
 		r.setLastModifiedDateTime(epoch());
 		r.setCreatedDateTime(epoch());
 		r.setLastAccessDateTime(epoch());
-		addColumnValues(r);
-		r.getColumnValues().set(0, "..");
+		addColumnValues(ctx, r);
 		return r;
 	}
 
-	private static void addColumnValues(NuclrResource r) {
-		r.getColumnValues().add(r.getName() == null ? "" : r.getName());
-		r.getColumnValues().add(r.isFolder() ? "" : String.valueOf(r.getLength()));
-		r.getColumnValues().add(String.valueOf(r.getLastModifiedDateTime()));
-		r.getColumnValues().add(String.valueOf(r.getCreatedDateTime()));
+	private static void addColumnValues(NuclrPluginContext ctx, NuclrResource r) {
+		r.getMetadata().put("Name", r.getName());
+		r.getMetadata().put("Size", r.isFolder() ? "Folder" : FileUtils.byteCountToDisplaySize(r.getLength()));
+		r.getMetadata().put("Date", getDate(ctx.getLocale(), r.getLastModifiedDateTime()));
+		r.getMetadata().put("Time", getTime(ctx.getLocale(), r.getLastAccessDateTime()));
 	}
+
+	/** Get time String in a localised format */
+	private static String getTime(Locale locale, LocalDateTime date) {
+			    return date
+			.toLocalTime()
+			.format(DateTimeFormatter
+				.ofLocalizedTime(FormatStyle.SHORT)
+				.withLocale(locale));
+	}
+
+	/** Get date String in a localised format */
+	private static String getDate(Locale locale, LocalDateTime date) {
+	    return date
+            .toLocalDate()
+            .format(DateTimeFormatter
+                .ofLocalizedDate(FormatStyle.SHORT)
+                .withLocale(locale));
+	}
+
 
 	private static String getFullPath(Path path) {
 		if (path == null) {

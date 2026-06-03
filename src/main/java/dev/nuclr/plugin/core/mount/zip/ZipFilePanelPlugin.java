@@ -25,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -234,7 +235,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		this.archiveFile = target;
 		this.archiveRootPath = root;
 		this.archiveDisplayName = target.getFileName() != null ? target.getFileName().toString() : target.toString();
-		this.currentFolder = ArchiveNuclrResource.buildRoot(root, archiveDisplayName);
+		this.currentFolder = ArchiveNuclrResource.buildRoot(context, root, archiveDisplayName);
 		this.closing = false;
 
 		return listDirectory(currentFolder, root);
@@ -348,14 +349,14 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		if (atRoot) {
 			// ".." at the archive root closes the archive and pops the panel.
-			data.getEntries().add(ArchiveNuclrResource.buildCloseParent(archiveFile));
+			data.getEntries().add(ArchiveNuclrResource.buildCloseParent(context, archiveFile));
 		} else if (dir.getParent() != null) {
-			data.getEntries().add(ArchiveNuclrResource.buildParent(dir.getParent()));
+			data.getEntries().add(ArchiveNuclrResource.buildParent(context, dir.getParent()));
 		}
 
 		final var children = new ArrayList<NuclrResource>();
 		try (var stream = Files.list(dir)) {
-			stream.forEach(p -> children.add(ArchiveNuclrResource.build(p)));
+			stream.forEach(p -> children.add(ArchiveNuclrResource.build(context, p)));
 		} catch (IOException e) {
 			log.error("Failed to list archive directory {}: {}", dir, e.getMessage(), e);
 		}
@@ -379,7 +380,12 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			return;
 		}
 		log.info("Closing archive panel for {}", archiveDisplayName);
-		context.getEventBus().emit(this, EventPluginUnload, Map.of("uuid", uuid, "selectionResource", archiveFile));
+		var event = new HashMap<String, Object>();
+		event.put("uuid", uuid);
+		if (archiveFile != null) {
+			event.put("selectionResource", archiveFile);
+		}
+		context.getEventBus().emit(this, EventPluginUnload, event);
 	}
 
 	@Override
@@ -397,21 +403,10 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	// =========================================================================
 
 	@Override
-	public boolean supports(NuclrResource resource) {
-
-		if (resource == null) {
-			return false;
-		}
-
-		// The root ".." that exits the archive must route back to openResource.
-		if (resource.getMetadata(ArchiveNuclrResource.KeyCloseArchive, Boolean.FALSE)) {
-			return !closing;
-		}
-
-		final Path path = resource.getPath();
+	public boolean supports(Path path) {
 
 		if (path == null) {
-			return false;
+			return archiveRootPath != null && !closing;
 		}
 
 		// Navigating directories already inside an open archive.
