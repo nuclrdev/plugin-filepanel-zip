@@ -40,8 +40,6 @@ import javax.swing.JPanel;
 import javax.swing.JPasswordField;
 import javax.swing.SwingUtilities;
 
-import org.apache.commons.io.FilenameUtils;
-
 import dev.nuclr.platform.events.NuclrEventListener;
 import dev.nuclr.platform.plugin.FilePanelNuclrPlugin;
 import dev.nuclr.platform.plugin.NuclrPluginCallback;
@@ -439,13 +437,24 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 
 		// Navigating directories already inside an open archive.
-		if (Files.isDirectory(path)) {
+		if (archiveRootPath != null && isInsideOpenArchive(path) && Files.isDirectory(path)) {
 			return true;
 		}
 
 		// Archive files inside an already-open archive must be routed through
 		// Commander so they get their own plugin instance and stack entry.
 		return archiveRootPath == null && ArchiveType.isArchiveFile(path);
+	}
+
+	private boolean isInsideOpenArchive(Path path) {
+		if (path == null || archiveRootPath == null) {
+			return false;
+		}
+		try {
+			return path.toAbsolutePath().normalize().startsWith(archiveRootPath.toAbsolutePath().normalize());
+		} catch (Exception e) {
+			return false;
+		}
 	}
 
 	// =========================================================================
@@ -459,23 +468,37 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	
 	@Override
 	public String getWindowTitle() {
-		
-		if (this.getCurrentResource()!=null && this.getCurrentResource().getPath()!=null) {
-			var sb = new StringBuilder();
-			sb.append(archiveFile.toAbsolutePath().toString());
-			sb.append(this.getCurrentResource().getPath().toAbsolutePath().toString());
-			var title = sb.toString();
-			title = FilenameUtils.normalize(title);
-			return title;
+
+		if (archiveFile == null) {
+			return getCurrentLocationDisplayText();
+		}
+		var title = archiveFile.toAbsolutePath().toString();
+		var currentResource = getCurrentResource();
+		var currentPath = currentResource != null ? currentResource.getPath() : null;
+		if (currentPath != null && archiveRootPath != null) {
+			var inside = relativeInsideArchive(currentPath);
+			if (!inside.isBlank()) {
+				return title + "/" + inside;
+			}
 		}
 
-		return getCurrentLocationDisplayText();
-		
+		return title;
 	}
 
 	@Override
 	public String getCurrentLocationDisplayText() {
-		return getWindowTitle();
+		if (currentFolder == null) {
+			return archiveDisplayName != null ? archiveDisplayName : "";
+		}
+
+		final Path path = currentFolder.getPath();
+
+		if (path == null || archiveRootPath == null) {
+			return archiveDisplayName != null ? archiveDisplayName : currentFolder.getName();
+		}
+
+		final String inside = relativeInsideArchive(path);
+		return inside.isEmpty() ? archiveDisplayName : archiveDisplayName + "/" + inside;
 	}
 
 	private String relativeInsideArchive(Path path) {
