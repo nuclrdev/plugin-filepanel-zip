@@ -47,6 +47,7 @@ import dev.nuclr.platform.plugin.FilePanelNuclrPlugin;
 import dev.nuclr.platform.plugin.NuclrPluginCallback;
 import dev.nuclr.platform.plugin.NuclrPluginContext;
 import dev.nuclr.platform.plugin.NuclrResource;
+import dev.nuclr.plugin.core.mount.zip.service.MakeNewFolderService;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -393,12 +394,37 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	@Override
 	public void handleMessage(Object source, String type, Map<String, Object> eventData, NuclrPluginCallback callback) {
-		// Archive panels are read-only; no inbound events are handled.
+
+		if ("filepanel.makeFolder".equals(type) && eventData != null) {
+			if (!focused || currentFolder == null) {
+				return;
+			}
+			if (!isWritableArchive()) {
+				showError("Make Folder", "This archive view is read-only.");
+				return;
+			}
+			var createdPath = MakeNewFolderService.makeNewFolder(currentFolder, callback);
+			if (createdPath == null) {
+				return;
+			}
+			try {
+				eventData.put("createdResource", ArchiveNuclrResource.build(context, createdPath));
+			} catch (UnsupportedOperationException ignored) {
+				log.debug("Make-folder event payload is immutable; created resource will not be selected.");
+			}
+		}
 	}
 
 	@Override
 	public boolean isMessageSupported(String type) {
-		return false;
+		return "filepanel.makeFolder".equals(type);
+	}
+
+	private boolean isWritableArchive() {
+		return mountedFileSystem != null
+				&& extractedTempDir == null
+				&& archiveFile != null
+				&& archiveFile.getFileSystem() == FileSystems.getDefault();
 	}
 
 	// =========================================================================
