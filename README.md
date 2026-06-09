@@ -15,9 +15,8 @@ It currently supports:
 
 ## What It Does
 
-The plugin now registers a `PanelProviderPlugin` (`ZipFilePanelProvider`) that:
-- Starts from normal filesystem roots, like the local filesystem panel.
-- Lets the user enter supported archive files directly from the panel.
+The plugin registers a typed SDK 3 `FilePanelNuclrPlugin` (`ArchivePlugin`) that:
+- Lets the user enter supported archive files from another file panel.
 - Mounts non-encrypted archives through the Java NIO ZIP filesystem provider.
 - Extracts encrypted ZIP-family archives, plus RAR/TAR/GZ archives, to a temporary directory so they can still be browsed.
 - Lets files inside archives participate in quick view and external open flows.
@@ -27,10 +26,8 @@ The plugin now registers a `PanelProviderPlugin` (`ZipFilePanelProvider`) that:
 - Plugin ID: `dev.nuclr.plugin.core.mount.zip`
 - Name: `Archive Panel`
 - Version: `1.0.0`
-- SDK dependency: `dev.nuclr:platform-sdk:2.0.1` (`provided`)
+- SDK dependency: `dev.nuclr:platform-sdk:3.0.1` (`provided`)
 - Java version: `21`
-
-Metadata file: `src/main/resources/plugin.json`
 
 ## Build
 
@@ -58,7 +55,6 @@ After `package`, Maven prepares:
 
 The plugin ZIP contains:
 - plugin JAR in the ZIP root
-- `plugin.json` in the ZIP root
 - runtime dependencies in `lib/`
 
 After `verify`, Maven also generates:
@@ -83,10 +79,11 @@ If you only need an unsigned plugin package, use `mvn clean package`.
 ## Source Layout
 
 ```text
-src/main/java/dev/nuclr/plugin/core/mount/zip/ZipFilePanelProvider.java
-src/main/java/dev/nuclr/plugin/core/mount/zip/ZipFilePanel.java
-src/main/java/dev/nuclr/plugin/core/mount/zip/ZipFilePanelModel.java
-src/main/resources/plugin.json
+src/main/java/dev/nuclr/plugin/core/mount/zip/ArchivePlugin.java
+src/main/java/dev/nuclr/plugin/core/mount/zip/ZipFilePanelPlugin.java
+src/main/java/dev/nuclr/plugin/core/mount/zip/ArchiveNuclrResource.java
+src/main/java/dev/nuclr/plugin/core/mount/zip/ArchiveMountManager.java
+src/main/java/dev/nuclr/plugin/core/mount/zip/ArchiveExtractor.java
 src/assembly/plugin.xml
 pom.xml
 ```

@@ -1,263 +1,670 @@
+/*
+
+	Copyright 2026 Sergio, Nuclr (https://nuclr.dev)
+
+	Licensed under the Apache License, Version 2.0 (the "License");
+	you may not use this file except in compliance with the License.
+	You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+	Unless required by applicable law or agreed to in writing, software
+	distributed under the License is distributed on an "AS IS" BASIS,
+	WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+	See the License for the specific language governing permissions and
+	limitations under the License.
+
+*/
 package dev.nuclr.plugin.core.mount.zip;
 
-import java.awt.BorderLayout;
-import java.awt.Dialog;
-import java.awt.Window;
-import java.io.BufferedInputStream;
+import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
 
-import javax.swing.BorderFactory;
-import javax.swing.JComponent;
-import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
+import javax.swing.JPanel;
 import javax.swing.JPasswordField;
 import javax.swing.SwingUtilities;
 
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
-import org.apache.commons.compress.utils.IOUtils;
-
-import com.github.junrar.Archive;
-import com.github.junrar.rarfile.FileHeader;
-
-import dev.nuclr.platform.NuclrThemeScheme;
 import dev.nuclr.platform.events.NuclrEventListener;
+import dev.nuclr.platform.plugin.BaseNuclrPlugin;
+import dev.nuclr.platform.plugin.FilePanelNuclrPlugin;
 import dev.nuclr.platform.plugin.NuclrMenuResource;
-import dev.nuclr.platform.plugin.NuclrPlugin;
+import dev.nuclr.platform.plugin.NuclrPluginCallback;
 import dev.nuclr.platform.plugin.NuclrPluginContext;
-import dev.nuclr.platform.plugin.NuclrPluginRole;
-import dev.nuclr.platform.plugin.NuclrResourcePath;
-import dev.nuclr.plugin.event.PluginClosePanelEvent;
-import dev.nuclr.plugin.event.PluginCopyEvent;
-import dev.nuclr.plugin.event.PluginMoveEvent;
-import dev.nuclr.plugin.event.PluginOpenItemEvent;
-import lombok.Data;
+import dev.nuclr.platform.plugin.NuclrResource;
+import dev.nuclr.plugin.core.mount.zip.service.DeleteService;
+import dev.nuclr.plugin.core.mount.zip.service.MakeNewFolderService;
 import lombok.extern.slf4j.Slf4j;
-import net.lingala.zip4j.ZipFile;
-import net.lingala.zip4j.exception.ZipException;
 
-@Data
+/**
+ * File-panel plugin that lets the commander browse archive files
+ * (ZIP/JAR/WAR/EAR, RAR, TAR, TAR.GZ/TGZ, GZIP) as if they were folders.
+ *
+ * <p>One plugin instance backs exactly one top-level archive. ZIP-family
+ * archives that are neither encrypted nor charset-broken are mounted in place
+ * through the Java NIO {@code ZipFileSystem}; everything else is extracted to a
+ * temporary directory. Nested archives (an archive living inside another
+ * archive) are routed to a fresh plugin instance, which materialises the entry
+ * to a real temp file before opening it.
+ *
+ * @see ArchiveType
+ * @see ArchiveExtractor
+ */
 @Slf4j
-public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
-
-	private String uuid = java.util.UUID.randomUUID().toString();
-	
-	// -------------------------------------------------------------------------
-	// Plugin metadata constants
-	// -------------------------------------------------------------------------
-
-	public static final String  PLUGIN_ID          = "dev.nuclr.plugin.core.mount.zip";
-	private static final String PLUGIN_NAME        = "Archive Panel";
-	private static final String PLUGIN_VERSION     = "1.0.0";
-	private static final String PLUGIN_DESCRIPTION = "Browse ZIP, JAR, WAR, EAR, RAR, TAR and GZ archives in the file panel.";
-	private static final String PLUGIN_AUTHOR      = "Nuclr Development Team";
-	private static final String PLUGIN_LICENSE     = "Apache-2.0";
-	private static final String PLUGIN_WEBSITE     = "https://nuclr.dev";
-	private static final String PLUGIN_PAGE_URL    = "https://nuclr.dev/plugins/core/filepanel-zip.html";
-	private static final String PLUGIN_DOC_URL     = PLUGIN_PAGE_URL;
-	private static final String PLUGIN_UNLOAD_EVENT = "plugin.unload";
+public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListener {
 
 	// -------------------------------------------------------------------------
-	// Event type constants
-	//
-	// MENU_ACTION_EVENT_TYPE  — emitted by the Commander when the user presses a
-	//                           function key while this panel is focused.
-	// COPY_RESOURCES_EVENT    — we emit this; Commander routes it to the opposite
-	//                           panel as "fs.copy".
-	// MOVE_RESOURCES_EVENT    — we emit this; Commander routes it to the opposite
-	//                           panel as "fs.move".
-	// FS_COPY_EVENT           — the Commander sends this to US when the opposite
-	//                           panel wants to copy files into our directory.
-	// FS_MOVE_EVENT           — same as FS_COPY_EVENT but for move.
+	// Plugin metadata
 	// -------------------------------------------------------------------------
 
-	private static final String MENU_ACTION_EVENT_TYPE = "dev.nuclr.plugin.core.mount.zip.menuAction";
-	private static final String COPY_RESOURCES_EVENT   = "dev.nuclr.platform.resources.copy";
-	private static final String MOVE_RESOURCES_EVENT   = "dev.nuclr.platform.resources.move";
-	private static final String FS_COPY_EVENT          = "fs.copy";
-	private static final String FS_MOVE_EVENT          = "fs.move";
-	private static final String THEME_UPDATED_EVENT    = "dev.nuclr.platform.theme.updated";
+	public static final String PluginId = "dev.nuclr.plugin.core.mount.zip";
+	private static final String PluginName = "Archive Panel";
+	private static final String PluginVersion = loadVersion();
+	private static final String PluginDescription = "Browse ZIP, JAR, WAR, EAR, RAR, TAR and GZIP archives in the file panel.";
+	private static final String PluginAuthor = "Nuclr Development Team";
+	private static final String PluginLicense = "Apache-2.0";
+	private static final String PluginWebsite = "https://nuclr.dev";
+	private static final String PluginPageUrl = "https://nuclr.dev/plugins/core/filepanel-zip.html";
+	private static final String PluginDocUrl = PluginPageUrl;
 
-	/**
-	 * Metadata key that tells the Commander which plugin class should handle
-	 * a panel-stack push for an archive resource.
-	 */
-	private static final String PANEL_STACK_PROVIDER_CLASS = "commander.panelStack.providerClass";
+	static final List<String> ColumnNames = List.of("Name", "Size", "Date", "Time");
 
-	// -------------------------------------------------------------------------
-	// Archive format classification
-	// -------------------------------------------------------------------------
-
-	private static final Set<String> ZIP_FAMILY_EXTENSIONS =
-			Set.of(".zip", ".jar", ".war", ".ear");
-	private static final List<Charset> LEGACY_ZIP_NAME_CHARSETS = List.of(
-			Charset.forName("UTF-8"),
-			Charset.forName("CP866"),
-			Charset.forName("windows-1251"));
-
-	private static final Set<String> ALL_ARCHIVE_EXTENSIONS =
-			Set.of(".zip", ".jar", ".war", ".ear", ".rar", ".tar", ".gz", ".tgz");
+	/** Commander event emitted to unload this panel layer (see {@code Events}). */
+	private static final String EventPluginUnload = "plugin.unload";
 
 	// -------------------------------------------------------------------------
-	// Runtime state
+	// Runtime state â€” one instance backs one mounted/extracted archive
 	// -------------------------------------------------------------------------
 
-	/** NIO ZIP filesystems currently mounted, keyed by their jar: URI. */
-	private final ConcurrentHashMap<URI, FileSystem> mountedFileSystems = new ConcurrentHashMap<>();
-
-	/** For each mounted ZIP filesystem, the real-filesystem path of the archive file. */
-	private final ConcurrentHashMap<FileSystem, Path> mountedArchiveSources = new ConcurrentHashMap<>();
-
-	/** For each mounted ZIP filesystem, the real file opened by the ZIP provider. */
-	private final ConcurrentHashMap<FileSystem, Path> mountedArchiveBackingFiles = new ConcurrentHashMap<>();
-
-	/**
-	 * Extracted temp directories for archives that cannot be mounted via NIO
-	 * (RAR, TAR, encrypted ZIP).  Key = temp dir, value = original archive path.
-	 */
-	private final ConcurrentHashMap<Path, Path> extractedArchiveRoots = new ConcurrentHashMap<>();
-
-	/** Temp files created to materialize virtual-filesystem entries for Desktop.open(). */
-	private final Set<Path> materializedTempFiles = ConcurrentHashMap.newKeySet();
-
-	private final ArchiveWriteService writeService = new ArchiveWriteService();
+	private final String uuid = UUID.randomUUID().toString();
 
 	private NuclrPluginContext context;
-	private ZipFilePanel panel;
+
 	private boolean focused;
 
+	/** The archive file this instance is browsing (on the real filesystem). */
+	private Path archiveFile;
+
+	/** Display name shown in the location bar (the archive file name). */
+	private String archiveDisplayName;
+
+	/** The virtual root of the open archive (NIO root or extraction temp dir). */
+	private Path archiveRootPath;
+
+	/** The currently displayed folder inside the archive. */
+	private NuclrResource currentFolder;
+
+	/** The mounted NIO filesystem, or {@code null} for extracted archives. */
+	private FileSystem mountedFileSystem;
+
+	/** The temp directory an archive was extracted into, or {@code null}. */
+	private Path extractedTempDir;
+
+	/** Set once the root parent entry requests this panel to close. */
+	private boolean closing;
+
+	/** Temp files created when materialising nested archives, for cleanup. */
+	private final List<Path> materializedTempFiles = new CopyOnWriteArrayList<>();
+
 	// =========================================================================
-	// NuclrPlugin — lifecycle
+	// Lifecycle
 	// =========================================================================
 
 	@Override
-	public void load(NuclrPluginContext context, boolean template) {
+	public void preinit(NuclrPluginContext context) {
 		this.context = context;
-		if (!template) {
-			context.getEventBus().subscribe(this);
-		}
 		log.info("Archive panel plugin loaded");
 	}
 
 	@Override
+	public NuclrPluginContext getContext() {
+		return context;
+	}
+
+	@Override
+	public void init() {
+		if (context != null) {
+			context.getEventBus().subscribe(this);
+		}
+	}
+
+	@Override
 	public void unload() {
+
 		if (context != null) {
 			context.getEventBus().unsubscribe(this);
 		}
-		closeMountedFileSystems();
-		deleteExtractedTempDirs();
-		deleteMaterializedTempFiles();
+
+		if (mountedFileSystem != null) {
+			try {
+				mountedFileSystem.close();
+			} catch (IOException e) {
+				log.warn("Failed to close mounted filesystem for {}: {}", archiveDisplayName, e.getMessage());
+			}
+			mountedFileSystem = null;
+		}
+
+		if (extractedTempDir != null) {
+			deleteRecursively(extractedTempDir);
+			extractedTempDir = null;
+		}
+
+		for (var temp : materializedTempFiles) {
+			try {
+				Files.deleteIfExists(temp);
+			} catch (IOException e) {
+				log.warn("Failed to delete materialized temp file {}: {}", temp, e.getMessage());
+			}
+		}
+		materializedTempFiles.clear();
+
 		log.info("Archive panel plugin unloaded");
 	}
 
-	private void closeMountedFileSystems() {
-		List<FileSystem> fileSystems = new ArrayList<>(mountedArchiveSources.keySet());
-		fileSystems.sort(Comparator.comparingInt(this::archiveDepth).reversed());
-		for (FileSystem fs : fileSystems) {
+	// =========================================================================
+	// Resource opening / navigation
+	// =========================================================================
+
+	@Override
+	public NuclrResourceData openResource(NuclrResource resourceToOpen,
+			AtomicBoolean cancelled) {
+
+		if (resourceToOpen == null || isCancelled(cancelled)) {
+			return null;
+		}
+
+		// Synthetic ".." at the archive root: close the archive and pop the panel.
+		if (resourceToOpen.getMetadata(ArchiveNuclrResource.KeyCloseArchive, Boolean.FALSE)) {
+			closing = true;
+			emitArchiveClosed();
+			resourceToOpen.getMetadata().remove(ArchiveNuclrResource.KeyCloseArchive);
+			resourceToOpen.setPath(null);
+			return null;
+		}
+
+		final Path target = resourceToOpen.getPath();
+
+		if (target == null) {
+			return null;
+		}
+
+		try {
+
+			// Navigating a directory already inside this open archive.
+			if (archiveRootPath != null && Files.isDirectory(target)) {
+				return listDirectory(resourceToOpen, target);
+			}
+
+			// Entering an archive file (top-level or a materialised nested archive).
+			if (!Files.isDirectory(target) && ArchiveType.isArchiveFile(target)) {
+				return openArchive(target);
+			}
+
+		} catch (IOException e) {
+			log.error("Failed to open archive resource {}: {}", target, e.getMessage(), e);
+			showError("Could not open archive", e.getMessage());
+		}
+
+		return null;
+	}
+
+	/** Mount or extract an archive file and return its root listing. */
+	private NuclrResourceData openArchive(Path target) throws IOException {
+
+		// If the archive lives inside another virtual filesystem, copy it out first.
+		Path realFile = materializeIfNeeded(target);
+
+		final ArchiveType type = ArchiveType.of(realFile);
+
+		final Path root = type.usesNioZipFilesystem() ? openZipFamily(realFile) : extractArchive(realFile, type);
+
+		if (root == null) {
+			return null;
+		}
+
+		this.archiveFile = target;
+		this.archiveRootPath = root;
+		this.archiveDisplayName = target.getFileName() != null ? target.getFileName().toString() : target.toString();
+		this.currentFolder = ArchiveNuclrResource.buildRoot(context, root, archiveDisplayName);
+		this.closing = false;
+
+		return listDirectory(currentFolder, root);
+	}
+
+	/**
+	 * Open a ZIP-family archive. Tries an in-place NIO mount first, then a mount
+	 * with a detected entry-name charset, and finally falls back to temp
+	 * extraction (handling encrypted archives via a password prompt).
+	 */
+	private Path openZipFamily(Path file) throws IOException {
+
+		if (ArchiveExtractor.isEncrypted(file)) {
+			return extractEncryptedZip(file);
+		}
+
+		try {
+			return mountZip(file, null);
+		} catch (IOException first) {
+			log.info("Default ZIP mount failed for {} ({}); retrying with detected charset",
+					file.getFileName(), first.getMessage());
+		}
+
+		final Charset detected = ArchiveExtractor.detectZipEntryCharset(file);
+
+		try {
+			return mountZip(file, detected);
+		} catch (IOException second) {
+			log.info("Charset ZIP mount failed for {} ({}); extracting instead",
+					file.getFileName(), second.getMessage());
+			return extractToTempDir(dir -> ArchiveExtractor.extractZip(file, dir, null, detected));
+		}
+	}
+
+	private Path mountZip(Path file, Charset charset) throws IOException {
+		final Map<String, ?> env = charset == null ? Map.of() : Map.of("encoding", charset.name());
+		final FileSystem fs = FileSystems.newFileSystem(file, env);
+		this.mountedFileSystem = fs;
+		return fs.getPath("/");
+	}
+
+	private Path extractEncryptedZip(Path file) throws IOException {
+
+		final Charset charset = ArchiveExtractor.detectZipEntryCharset(file);
+
+		char[] password = promptPassword(file.getFileName().toString(), false);
+
+		while (password != null) {
+			final char[] attempt = password;
 			try {
-				closeMountedFileSystem(fs);
-			} catch (IOException ignored) { }
+				return extractToTempDir(dir -> ArchiveExtractor.extractZip(file, dir, attempt, charset));
+			} catch (ArchiveExtractor.WrongPasswordException wrong) {
+				password = promptPassword(file.getFileName().toString(), true);
+			}
 		}
-		mountedFileSystems.clear();
-		mountedArchiveSources.clear();
-		mountedArchiveBackingFiles.clear();
+
+		// User cancelled the password prompt.
+		return null;
 	}
 
-	private void deleteExtractedTempDirs() {
-		for (Path tempDir : extractedArchiveRoots.keySet()) {
-			deleteRecursively(tempDir);
-		}
-		extractedArchiveRoots.clear();
+	private Path extractArchive(Path file, ArchiveType type) throws IOException {
+		return switch (type) {
+			case RAR -> extractToTempDir(dir -> ArchiveExtractor.extractRar(file, dir));
+			case TAR -> extractToTempDir(dir -> ArchiveExtractor.extractTar(file, dir, false));
+			case TAR_GZ -> extractToTempDir(dir -> ArchiveExtractor.extractTar(file, dir, true));
+			case GZIP -> extractToTempDir(dir -> ArchiveExtractor.extractGzip(file, dir));
+			default -> throw new IOException("Unsupported archive type: " + type);
+		};
 	}
 
-	private void deleteMaterializedTempFiles() {
-		for (Path tempFile : materializedTempFiles) {
-			try { Files.deleteIfExists(tempFile); } catch (IOException ignored) { }
+	private interface ExtractionTask {
+		void extract(Path destination) throws IOException;
+	}
+
+	private Path extractToTempDir(ExtractionTask task) throws IOException {
+		final Path dir = Files.createTempDirectory("nuclr-archive-" + UUID.randomUUID());
+		this.extractedTempDir = dir;
+		task.extract(dir);
+		return dir;
+	}
+
+	/**
+	 * If {@code target} is not on the default filesystem (i.e. it is a nested
+	 * archive inside an already-mounted ZIP), copy it out to a real temp file so
+	 * the NIO/extraction providers can open it.
+	 */
+	private Path materializeIfNeeded(Path target) throws IOException {
+
+		if (target.getFileSystem() == FileSystems.getDefault()) {
+			return target;
 		}
-		materializedTempFiles.clear();
+
+		final String name = target.getFileName() != null ? target.getFileName().toString() : "archive";
+		final Path temp = Files.createTempFile("nuclr-nested-" + UUID.randomUUID() + "-", "-" + name);
+		Files.copy(target, temp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+		materializedTempFiles.add(temp);
+
+		log.info("Materialized nested archive {} to {}", name, temp);
+		return temp;
+	}
+
+	/** Build the listing for a directory inside the open archive. */
+	private NuclrResourceData listDirectory(NuclrResource folderResource, Path dir) {
+
+		this.currentFolder = folderResource;
+
+		final var data = new NuclrResourceData();
+		data.setColumnNames(ColumnNames);
+
+		final boolean atRoot = dir.equals(archiveRootPath);
+
+		if (atRoot) {
+			// ".." at the archive root closes the archive and pops the panel.
+			data.getEntries().add(ArchiveNuclrResource.buildCloseParent(context, archiveFile));
+		} else if (dir.getParent() != null) {
+			data.getEntries().add(ArchiveNuclrResource.buildParent(context, dir.getParent()));
+		}
+
+		final var children = new ArrayList<NuclrResource>();
+		try (var stream = Files.list(dir)) {
+			stream.forEach(p -> children.add(ArchiveNuclrResource.build(context, p)));
+		} catch (IOException e) {
+			log.error("Failed to list archive directory {}: {}", dir, e.getMessage(), e);
+		}
+
+		// Folders first, then files, both alphabetically â€” a familiar panel order.
+		children.sort(Comparator.comparing((NuclrResource r) -> !r.isFolder())
+				.thenComparing(r -> r.getName(), String.CASE_INSENSITIVE_ORDER));
+
+		data.getEntries().addAll(children);
+
+		return data;
 	}
 
 	// =========================================================================
-	// NuclrPlugin — panel & metadata
+	// Events
 	// =========================================================================
 
-	@Override
-	public JComponent panel() {
-		if (panel == null) {
-			panel = new ZipFilePanel(this);
-			panel.setThemeScheme(context.getTheme());
+	/** Ask the commander to pop this archive panel layer and unload us. */
+	private void emitArchiveClosed() {
+		if (context == null || context.getEventBus() == null) {
+			return;
 		}
-		return panel;
+		log.info("Closing archive panel for {}", archiveDisplayName);
+		var event = new HashMap<String, Object>();
+		event.put("uuid", uuid);
+		if (archiveFile != null) {
+			event.put("selectionResource", archiveFile);
+		}
+		context.getEventBus().emit(this, EventPluginUnload, event);
 	}
 
 	@Override
-	public String id()          { return PLUGIN_ID; }
+	public void handleMessage(Object source, String type, Map<String, Object> eventData, NuclrPluginCallback callback) {
+
+		if (("delete".equals(type) || "deletePermanent".equals(type)) && eventData != null) {
+			handleDelete(eventData, callback);
+			return;
+		}
+
+		if ("filepanel.makeFolder".equals(type) && eventData != null) {
+			if (!focused || currentFolder == null) {
+				return;
+			}
+			if (!isWritableArchive()) {
+				showError("Make Folder", "This archive view is read-only.");
+				return;
+			}
+			var createdPath = MakeNewFolderService.makeNewFolder(currentFolder, callback);
+			if (createdPath == null) {
+				return;
+			}
+			try {
+				eventData.put("createdResource", ArchiveNuclrResource.build(context, createdPath));
+			} catch (UnsupportedOperationException ignored) {
+				log.debug("Make-folder event payload is immutable; created resource will not be selected.");
+			}
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private void handleDelete(Map<String, Object> eventData, NuclrPluginCallback callback) {
+
+		// Delivered directly to this (focused) panel's plugin by the commander, so no focus guard
+		// is needed â€” the broadcast that used to require it no longer happens.
+		if (!(eventData.get("sources") instanceof List<?> list) || list.isEmpty()) {
+			return;
+		}
+
+		// Entries can only be removed from a writable NIO Zip mount; temp-extracted views
+		// (RAR/TAR/encrypted) are read-only, so deleting from them would only touch the
+		// throwaway extraction and never the original archive.
+		if (!isWritableArchive()) {
+			showError("Delete", "This archive view is read-only.");
+			return;
+		}
+
+		List<NuclrResource> sources = (List<NuclrResource>) list;
+
+		// Plugin-rendered confirmation listing the full paths to be deleted.
+		if (!DeleteDialogs.confirmDelete(sources)) {
+			return;
+		}
+
+		DeleteService.delete(sources, callback, (item, e) -> DeleteDialogs.error(item.getName(), e));
+	}
+
 	@Override
-	public String name()        { return PLUGIN_NAME; }
+	public boolean isMessageSupported(String type) {
+		return "filepanel.makeFolder".equals(type) || "delete".equals(type) || "deletePermanent".equals(type);
+	}
+
 	@Override
-	public String version()     { return PLUGIN_VERSION; }
-	@Override
-	public String description() { return PLUGIN_DESCRIPTION; }
-	@Override
-	public String author()      { return PLUGIN_AUTHOR; }
-	@Override
-	public String license()     { return PLUGIN_LICENSE; }
-	@Override
-	public String website()     { return PLUGIN_WEBSITE; }
-	@Override
-	public String pageUrl()     { return PLUGIN_PAGE_URL; }
-	@Override
-	public String docUrl()      { return PLUGIN_DOC_URL; }
-	@Override
-	public Developer type()     { return Developer.Official; }
-	@Override
-	public int priority()       { return 0; }
-	@Override
-	public boolean singleton()  { return false; }
-	@Override
-	public NuclrPluginRole role() { return NuclrPluginRole.FilePanel; }
+	public List<NuclrMenuResource> menuItems(NuclrResource source) {
+
+		// Mirror the local-filesystem panel's function-bar menu so the archive view behaves the
+		// same way. In particular this provides Delete (F8) and Delete Permanently (Shift+F8),
+		// which is how those keys reach the delete logic (the function-key bar dispatches them).
+		var items = new ArrayList<NuclrMenuResource>();
+
+		boolean isDirectory = source != null && source.getPath() != null && Files.isDirectory(source.getPath());
+
+		addDefaultMenuItems(items, isDirectory);
+		addAltMenuItems(items);
+		addCtrlMenuItems(items);
+		addShiftMenuItems(items);
+
+		return items;
+	}
+
+	private static void addDefaultMenuItems(List<NuclrMenuResource> items, boolean isDirectory) {
+		items.add(menu("View", "F3", "view"));
+		items.add(menu("Edit", "F4", "edit"));
+		items.add(menu("Copy", "F5", "copy"));
+		items.add(menu(isDirectory ? "Move" : "Rename/Move", "F6", "move"));
+		items.add(menu("Make Folder", "F7", "filepanel.makeFolder"));
+		items.add(menu("Delete", "F8", "delete"));
+		items.add(menu("Quit", "F10", "quit"));
+		items.add(menu("Plugins", "F11", "plugins"));
+		items.add(menu("Screen", "F12", "screen"));
+	}
+
+	private static void addAltMenuItems(List<NuclrMenuResource> items) {
+		items.add(menu("Left Panel", "Alt+F1", "left"));
+		items.add(menu("Right Panel", "Alt+F2", "right"));
+		items.add(menu("Find", "Alt+F7", "find"));
+		items.add(menu("History", "Alt+F8", "history"));
+		items.add(menu("Fullscreen", "Alt+F9", "fullscreen"));
+		items.add(menu("Tree", "Alt+F10", "tree"));
+		items.add(menu("View History", "Alt+F11", "viewHistory"));
+		items.add(menu("Folder History", "Alt+F12", "folderHistory"));
+	}
+
+	private static void addCtrlMenuItems(List<NuclrMenuResource> items) {
+		items.add(menu("Hide Left", "Ctrl+F1", "hideLeft"));
+		items.add(menu("Hide Right", "Ctrl+F2", "hideRight"));
+		items.add(menu("Sort by name", "Ctrl+F3", "sortByName"));
+		items.add(menu("Sort by extension", "Ctrl+F4", "sortByExtension"));
+		items.add(menu("Sort by modified", "Ctrl+F5", "sortByModifiedDate"));
+		items.add(menu("Sort by size", "Ctrl+F6", "sortBySize"));
+		items.add(menu("Unsort", "Ctrl+F7", "unsort"));
+		items.add(menu("Sort by create", "Ctrl+F8", "sortByCreateDate"));
+		items.add(menu("Sort by access", "Ctrl+F9", "sortByAccessTime"));
+		items.add(menu("Sort menu", "Ctrl+F12", "sortMenu"));
+	}
+
+	private static void addShiftMenuItems(List<NuclrMenuResource> items) {
+		items.add(menu("Delete Permanently", "Shift+F8", "deletePermanent"));
+	}
+
+	private static NuclrMenuResource menu(String name, String functionKey, String eventType) {
+		return new NuclrMenuResource(name, functionKey, eventType);
+	}
+
+	private boolean isWritableArchive() {
+		return mountedFileSystem != null
+				&& extractedTempDir == null
+				&& archiveFile != null
+				&& archiveFile.getFileSystem() == FileSystems.getDefault();
+	}
 
 	// =========================================================================
-	// NuclrPlugin — focus
+	// Routing
+	// =========================================================================
+
+	@Override
+	public boolean supports(Path path) {
+
+		if (path == null) {
+			return archiveRootPath != null && !closing;
+		}
+
+		// Navigating directories already inside an open archive.
+		if (archiveRootPath != null && isInsideOpenArchive(path) && Files.isDirectory(path)) {
+			return true;
+		}
+
+		// Archive files inside an already-open archive must be routed through
+		// Commander so they get their own plugin instance and stack entry.
+		return archiveRootPath == null && ArchiveType.isArchiveFile(path);
+	}
+
+	private boolean isInsideOpenArchive(Path path) {
+		if (path == null || archiveRootPath == null) {
+			return false;
+		}
+		try {
+			return path.toAbsolutePath().normalize().startsWith(archiveRootPath.toAbsolutePath().normalize());
+		} catch (Exception e) {
+			return false;
+		}
+	}
+
+	// =========================================================================
+	// Location / selection display
+	// =========================================================================
+
+	@Override
+	public NuclrResource getCurrentResource() {
+		return currentFolder;
+	}
+	
+	@Override
+	public String getWindowTitle() {
+
+		if (archiveFile == null) {
+			return getCurrentLocationDisplayText();
+		}
+		var title = archiveFile.toAbsolutePath().toString();
+		var currentResource = getCurrentResource();
+		var currentPath = currentResource != null ? currentResource.getPath() : null;
+		if (currentPath != null && archiveRootPath != null) {
+			var inside = relativeInsideArchive(currentPath);
+			if (!inside.isBlank()) {
+				return title + "/" + inside;
+			}
+		}
+
+		return title;
+	}
+
+	@Override
+	public String getCurrentLocationDisplayText() {
+		if (currentFolder == null) {
+			return archiveDisplayName != null ? archiveDisplayName : "";
+		}
+
+		final Path path = currentFolder.getPath();
+
+		if (path == null || archiveRootPath == null) {
+			return archiveDisplayName != null ? archiveDisplayName : currentFolder.getName();
+		}
+
+		final String inside = relativeInsideArchive(path);
+		return inside.isEmpty() ? archiveDisplayName : archiveDisplayName + "/" + inside;
+	}
+
+	private String relativeInsideArchive(Path path) {
+		try {
+			final String rel = archiveRootPath.relativize(path).toString().replace('\\', '/');
+			return rel;
+		} catch (IllegalArgumentException e) {
+			return "";
+		}
+	}
+
+	@Override
+	public String getSelectionSummaryText(List<NuclrResource> selectedResources) {
+
+		if (selectedResources == null || selectedResources.isEmpty()) {
+			return getCurrentLocationDisplayText();
+		}
+
+		if (selectedResources.size() == 1) {
+			final var resource = selectedResources.get(0);
+			final Path path = resource.getPath();
+			final boolean directory = path != null && Files.isDirectory(path);
+			final String type = directory ? "Folder" : humanReadableSize(resource.getLength());
+			final String name = resource.getName() == null || resource.getName().isBlank() ? "?" : resource.getName();
+			return name + "  |  " + type;
+		}
+
+		long totalBytes = 0L;
+		int fileCount = 0;
+		int folderCount = 0;
+		for (var resource : selectedResources) {
+			final Path path = resource.getPath();
+			if (path != null && Files.isDirectory(path)) {
+				folderCount++;
+			} else {
+				fileCount++;
+				totalBytes += resource.getLength();
+			}
+		}
+		return "Bytes: " + humanReadableSize(totalBytes) + ",  files: " + fileCount + ",  folders: " + folderCount;
+	}
+
+	private static String humanReadableSize(long sizeBytes) {
+		if (sizeBytes < 1024) {
+			return sizeBytes + " B";
+		}
+		double value = sizeBytes;
+		final String[] units = { "KB", "MB", "GB", "TB", "PB" };
+		int unitIndex = -1;
+		while (value >= 1024 && unitIndex < units.length - 1) {
+			value /= 1024;
+			unitIndex++;
+		}
+		return String.format(Locale.ROOT, unitIndex == 0 ? "%.0f %s" : "%.1f %s", value, units[unitIndex]);
+	}
+
+	// =========================================================================
+	// Focus
 	// =========================================================================
 
 	@Override
 	public boolean onFocusGained() {
 		focused = true;
-		if (panel != null) {
-			panel.setPluginFocused(true);
-		}
 		return true;
 	}
 
 	@Override
 	public void onFocusLost() {
 		focused = false;
-		if (panel != null) {
-			panel.setPluginFocused(false);
-		}
 	}
 
 	@Override
@@ -265,1164 +672,156 @@ public class ZipFilePanelPlugin implements NuclrPlugin, NuclrEventListener {
 		return focused;
 	}
 
-	// =========================================================================
-	// NuclrPlugin — resource handling
-	// =========================================================================
-
-	@Override
-	public boolean supports(NuclrResourcePath resource) {
-		return resource != null && resource.getPath() != null && isArchivePath(resource.getPath());
-	}
-
-	@Override
-	public boolean openResource(NuclrResourcePath resource, AtomicBoolean cancelled) {
-		panel(); // ensure panel is created
-		if (cancelled != null && cancelled.get()) {
-			unloadCurrentInstance();
-			return false;
-		}
-		if (resource == null || resource.getPath() == null) {
-			unloadCurrentInstance();
-			return false;
-		}
-		Path browsable = resolveBrowsablePath(resource.getPath());
-		if (browsable == null) {
-			unloadCurrentInstance();
-			return false;
-		}
-
-		// panel.showDirectory is a Swing call — must happen on the EDT.
-		// openResource may be called from a background thread by the Commander
-		// (the AtomicBoolean cancelled parameter is the tell), so we dispatch
-		// showDirectory to the EDT regardless of the current thread.
-		if (SwingUtilities.isEventDispatchThread()) {
-			panel.showDirectory(browsable);
-		} else {
-			SwingUtilities.invokeLater(() -> panel.showDirectory(browsable));
-		}
-		return true;
-	}
-
 	@Override
 	public void closeResource() {
-		// No per-resource teardown needed; unload() handles global cleanup.
-	}
-
-	@Override
-	public void updateTheme(NuclrThemeScheme themeScheme) {
-		if (panel != null) {
-			panel.setThemeScheme(themeScheme);
-			panel.repaint();
-		}
+		// Navigation is driven by openResource; nothing to release per-resource.
 	}
 
 	// =========================================================================
-	// NuclrPlugin — drive list & menu
+	// Metadata accessors
 	// =========================================================================
 
 	@Override
-	public List<NuclrResourcePath> getChangeDriveResources() {
-		return List.of();
+	public String id() {
+		return PluginId;
 	}
 
 	@Override
-	public List<NuclrMenuResource> menuItems(NuclrResourcePath source) {
-		boolean isDir = source != null && source.getPath() != null && Files.isDirectory(source.getPath());
-		List<NuclrMenuResource> items = new ArrayList<>();
-		items.add(menu("Help",                      "F1"));
-		items.add(menu("Copy",                      "F5"));
-		items.add(menu(isDir ? "Move" : "Move",     "F6"));
-		items.add(menu("Make Folder",               "F7"));
-		items.add(menu("Delete",                    "F8"));
-		items.add(menu("Quit",                      "F10"));
-		items.add(menu("Plugins",                   "F11"));
-		return items;
-	}
-
-	private NuclrMenuResource menu(String name, String keyStroke) {
-		ZipMenuResource item = new ZipMenuResource();
-		item.setName(name);
-		item.setKeyStroke(keyStroke);
-		item.setEventType(MENU_ACTION_EVENT_TYPE);
-		return item;
-	}
-
-	// =========================================================================
-	// NuclrEventListener — incoming event bus messages
-	// =========================================================================
-
-	@Override
-	public boolean isMessageSupported(String type) {
-		return true;
+	public String name() {
+		return PluginName;
 	}
 
 	@Override
-	public void handleMessage(Object source, String type, Map<String, Object> event) {
-
-		// Never process our own emissions
-		if (source == this || source == panel) {
-			return;
-		}
-
-		log.debug("handleMessage type={}", type);
-
-		// ------------------------------------------------------------------
-		// Theme update — always apply, regardless of focus
-		// ------------------------------------------------------------------
-		if (THEME_UPDATED_EVENT.equals(type)) {
-			if (panel != null) {
-				panel.repaint();
-			}
-			return;
-		}
-
-		// ------------------------------------------------------------------
-		// Incoming copy: the opposite panel wants to copy files into our
-		// current directory.  Only handle when we are the focused (target) panel.
-		// ------------------------------------------------------------------
-		if (FS_COPY_EVENT.equals(type) && focused && panel != null) {
-			List<NuclrResourcePath> paths = extractResourceList(event, "paths");
-			if (!paths.isEmpty()) {
-				if (handleCopyIntoArchive(paths, null)) {
-					markAccepted(event);
-				}
-			}
-			return;
-		}
-
-		// ------------------------------------------------------------------
-		// Incoming move: same as copy, but the source panel also deletes its
-		// files afterwards (handled by the source panel's move engine).
-		// ------------------------------------------------------------------
-		if (FS_MOVE_EVENT.equals(type) && focused && panel != null) {
-			List<NuclrResourcePath> paths = extractResourceList(event, "paths");
-			if (!paths.isEmpty()) {
-				// The source refresh callback is not passed through the event bus;
-				// our responsibility is just to receive the files.
-				handleCopyIntoArchive(paths, null);
-			}
-			return;
-		}
-
-		// ------------------------------------------------------------------
-		// Menu action — only dispatch when focused and the event type matches
-		// ------------------------------------------------------------------
-		if (MENU_ACTION_EVENT_TYPE.equals(type) && focused) {
-			handleMenuAction(event);
+	public String version() {
+		return PluginVersion;
+	}
+	private static String loadVersion() {
+		try (var stream = ZipFilePanelPlugin.class.getResourceAsStream("/plugin.properties")) {
+			if (stream == null) return "unknown";
+			var props = new java.util.Properties();
+			props.load(stream);
+			return props.getProperty("version", "unknown");
+		} catch (java.io.IOException e) {
+			return "unknown";
 		}
 	}
 
-	private void handleMenuAction(Map<String, Object> event) {
-		if (event == null) {
-			return;
-		}
-		Object labelObj = event.get("label");
-		if (!(labelObj instanceof String label)) {
-			return;
-		}
-		switch (label) {
-			case "Copy"        -> emitCopyRequest(panel.getSelectedResources());
-			case "Move"        -> emitMoveRequest(panel.getSelectedResources());
-			case "Make Folder" -> { if (panel != null) panel.promptCreateFolder(); }
-			case "Delete"      -> { if (panel != null) panel.promptDeleteSelection(); }
-			default            -> log.debug("Unhandled menu action: {}", label);
-		}
+	@Override
+	public String description() {
+		return PluginDescription;
 	}
 
-	/**
-	 * Add incoming files (from the opposite panel) into our current archive directory.
-	 *
-	 * <p>Only supported when the current directory lives in a mounted NIO ZIP
-	 * filesystem (i.e. writes persist to the archive).  For extracted temp
-	 * directories (TAR, RAR) the operation is rejected with a status message.
-	 */
-	private boolean handleCopyIntoArchive(List<NuclrResourcePath> resources, Runnable onSourceRefresh) {
-		Path targetDir = panel.getCurrentDirectory();
-		if (targetDir == null) {
-			return false;
-		}
-		if (!isWritableArchiveDirectory(targetDir)) {
-			log.info("Copy-into ignored: archive is read-only (extracted temp dir)");
-			return false;
-		}
-
-		List<Path> sources = resources.stream()
-				.filter(r -> r != null && r.getPath() != null)
-				.map(NuclrResourcePath::getPath)
-				.collect(Collectors.toList());
-
-		if (sources.isEmpty()) {
-			return false;
-		}
-
-		writeService.addFiles(targetDir, sources, panel, () -> {
-			panel.refreshCurrentDirectoryAfterWrite();
-			if (onSourceRefresh != null) {
-				onSourceRefresh.run();
-			}
-		});
-		return true;
+	@Override
+	public String author() {
+		return PluginAuthor;
 	}
 
-	private static void markAccepted(Map<String, Object> event) {
-		if (event != null && event.get("accepted") instanceof AtomicBoolean accepted) {
-			accepted.set(true);
-		}
+	@Override
+	public String license() {
+		return PluginLicense;
 	}
 
-	// =========================================================================
-	// Copy / move emission (called from ZipFilePanel via keyboard)
-	// =========================================================================
-
-	/**
-	 * Emit a copy request so the Commander routes it to the opposite panel.
-	 * The opposite panel will call its own copy workflow with our selected
-	 * resources as the sources.
-	 */
-	void emitCopyRequest(List<NuclrResourcePath> selectedResources) {
-		if (context == null || selectedResources.isEmpty()) {
-			return;
-		}
-		PluginCopyEvent copyEvent = new PluginCopyEvent(this, selectedResources);
-		context.getEventBus().emit(PLUGIN_ID, COPY_RESOURCES_EVENT, copyEvent.toEvent());
-		log.info("Emitted copy request for {} item(s)", selectedResources.size());
+	@Override
+	public String website() {
+		return PluginWebsite;
 	}
 
-	/**
-	 * Emit a move request so the Commander routes it to the opposite panel.
-	 * The opposite panel copies the files then deletes them from their source
-	 * (which, for archive NIO paths, means the ZIP entries get deleted).
-	 */
-	void emitMoveRequest(List<NuclrResourcePath> selectedResources) {
-		if (context == null || selectedResources.isEmpty()) {
-			return;
-		}
-		PluginMoveEvent moveEvent = new PluginMoveEvent(this, selectedResources);
-		context.getEventBus().emit(PLUGIN_ID, MOVE_RESOURCES_EVENT, moveEvent.toEvent());
-		log.info("Emitted move request for {} item(s)", selectedResources.size());
+	@Override
+	public String pageUrl() {
+		return PluginPageUrl;
 	}
 
-	// =========================================================================
-	// Panel stack (open nested archive / go back)
-	// =========================================================================
-
-	/**
-	 * Ask the Commander to push a new archive panel on top of the current one.
-	 *
-	 * @return {@code true} if the event was emitted
-	 */
-	public boolean pushArchivePanel(Path archivePath) {
-		if (context == null || !isArchivePath(archivePath)) {
-			return false;
-		}
-		PluginOpenItemEvent event = new PluginOpenItemEvent(this, toStackResource(archivePath));
-		context.getEventBus().emit("PluginOpenItemEvent", event.toEventData());
-		return true;
+	@Override
+	public String docUrl() {
+		return PluginDocUrl;
 	}
 
-	/**
-	 * Ask the Commander to pop the current archive panel layer (go back to caller).
-	 *
-	 * @return {@code true} if the event was emitted
-	 */
-	public boolean popPanelLayer() {
-		if (context == null) {
-			return false;
-		}
-		Map<String, Object> event = new PluginClosePanelEvent(this).toEvent();
-		context.getEventBus().emit("PluginClosePanelEvent", event);
-		return true;
+	@Override
+	public Developer developer() {
+		return Developer.Official;
 	}
 
-	/**
-	 * Ask the host to unload this plugin instance.
-	 *
-	 * @return {@code true} if the event was emitted
-	 */
-	public boolean unloadCurrentInstance() {
-		if (context == null) {
-			return false;
-		}
-		context.getEventBus().emit(PLUGIN_UNLOAD_EVENT, Map.of("uuid", uuid));
-		return true;
-	}
-
-	// =========================================================================
-	// Archive mount / resolution (called from ZipFilePanel)
-	// =========================================================================
-
-	public boolean isArchivePath(Path path) {
-		return archiveType(path) != null;
-	}
-
-	/**
-	 * Return a browsable {@link Path} for the given path:
-	 * <ul>
-	 *   <li>If it is already a directory — return it as-is.</li>
-	 *   <li>If it is a supported archive — mount or extract it and return the root.</li>
-	 *   <li>Otherwise — return {@code null}.</li>
-	 * </ul>
-	 */
-	public Path resolveBrowsablePath(Path path) {
-		if (path == null) {
-			return null;
-		}
-		if (Files.isDirectory(path)) {
-			return path;
-		}
-		if (isArchivePath(path)) {
-			try {
-				return mountArchive(path);
-			} catch (IOException ex) {
-				log.error("Failed to mount archive {}: {}", path, ex.getMessage());
-				return null;
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * Return the real-filesystem path of the archive file that contains {@code path},
-	 * or {@code null} if {@code path} is not inside any mounted/extracted archive.
-	 */
-	public Path getArchiveSource(Path path) {
-		if (path == null) {
-			return null;
-		}
-		// Check NIO-mounted ZIP filesystems first
-		Path mountedSource = mountedArchiveSources.get(path.getFileSystem());
-		if (mountedSource != null) {
-			return mountedSource;
-		}
-		// Then check extracted temp directories
-		for (Map.Entry<Path, Path> entry : extractedArchiveRoots.entrySet()) {
-			if (path.normalize().startsWith(entry.getKey().normalize())) {
-				return entry.getValue();
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * Return the root path of the archive that contains {@code path},
-	 * or {@code null} if {@code path} is not inside any archive.
-	 */
-	public Path getArchiveRoot(Path path) {
-		if (path == null) {
-			return null;
-		}
-		if (mountedArchiveSources.containsKey(path.getFileSystem())) {
-			return path.getFileSystem().getPath("/");
-		}
-		for (Path root : extractedArchiveRoots.keySet()) {
-			if (path.normalize().startsWith(root.normalize())) {
-				return root;
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * Return {@code true} if {@code path} is the root directory of a mounted or
-	 * extracted archive (i.e. ".." would exit the archive).
-	 */
-	public boolean isArchiveRoot(Path path) {
-		Path root = getArchiveRoot(path);
-		return root != null && root.equals(path);
-	}
-
-	/**
-	 * Return {@code true} if {@code directory} is inside a mounted NIO ZIP
-	 * filesystem — meaning write operations on it will persist to the archive file.
-	 *
-	 * <p>Returns {@code false} for extracted temp directories (TAR, RAR, encrypted ZIP),
-	 * where writes only affect the temp copy and are lost when the plugin is unloaded.
-	 */
-	public boolean isWritableArchiveDirectory(Path directory) {
-		if (directory == null) {
-			return false;
-		}
-		// NIO ZIP filesystem paths are NOT on the default filesystem
-		return !directory.getFileSystem().equals(FileSystems.getDefault());
-	}
-
-	/**
-	 * Flush writes for the archive containing {@code directory} and remount it so the
-	 * returned path is backed by a live filesystem after a mutation.
-	 */
-	public Path refreshArchiveDirectory(Path directory) {
-		if (directory == null || directory.getFileSystem().equals(FileSystems.getDefault())) {
-			return directory;
-		}
-
-		FileSystem fileSystem = directory.getFileSystem();
-		Path archiveRoot = fileSystem.getPath("/");
-		Path relativePath = archiveRoot.relativize(directory);
-		Path archiveSource = mountedArchiveSources.get(fileSystem);
-		if (archiveSource == null) {
-			return directory;
-		}
-
-		try {
-			closeMountedFileSystem(fileSystem);
-			Path remountedRoot = resolveBrowsablePath(archiveSource);
-			if (remountedRoot == null) {
-				return null;
-			}
-			return resolveRelative(remountedRoot, relativePath);
-		} catch (IOException ex) {
-			log.error("Failed to refresh archive directory {}", directory, ex);
-			return null;
-		}
-	}
-
-	/**
-	 * Materialize a virtual-filesystem entry (e.g. a file inside a mounted ZIP)
-	 * as a real temp file so that {@code Desktop.open()} can open it.
-	 *
-	 * <p>The temp file is registered for deletion on {@link #unload()}.
-	 */
-	public Path materializeFile(Path path) throws IOException {
-		if (path == null) {
-			return null;
-		}
-		if (path.getFileSystem().equals(FileSystems.getDefault())) {
-			return path; // already a real file, nothing to do
-		}
-
-		String fileName = path.getFileName() == null ? "archive-entry" : path.getFileName().toString();
-		String prefix = fileName;
-		String suffix = "";
-		int dot = fileName.lastIndexOf('.');
-		if (dot > 0) {
-			prefix = fileName.substring(0, dot);
-			suffix = fileName.substring(dot);
-		}
-		if (prefix.length() < 3) {
-			prefix = (prefix + "___").substring(0, 3);
-		}
-
-		Path tempFile = Files.createTempFile("nuclr-" + prefix + "-", suffix);
-		tempFile.toFile().deleteOnExit();
-		materializedTempFiles.add(tempFile);
-		Files.copy(path, tempFile, StandardCopyOption.REPLACE_EXISTING);
-		return tempFile;
-	}
-
-	/** Expose the write service so {@link ZipFilePanel} can invoke it directly. */
-	ArchiveWriteService getWriteService() {
-		return writeService;
-	}
-
-	// =========================================================================
-	// Resource construction helpers
-	// =========================================================================
-
-	public NuclrResourcePath toResource(Path path) {
-		NuclrResourcePath resource = new NuclrResourcePath();
-		resource.setPath(path);
-		resource.setName(path.getFileName() == null ? path.toString() : path.getFileName().toString());
-		try {
-			if (Files.isRegularFile(path)) {
-				resource.setSizeBytes(Files.size(path));
-			}
-		} catch (IOException ignored) {
-			resource.setSizeBytes(0L);
-		}
-		return resource;
-	}
-
-	/** Build a resource that carries the panel-stack metadata the Commander needs. */
-	private NuclrResourcePath toStackResource(Path path) {
-		NuclrResourcePath resource = toResource(path);
-		Map<String, String> metadata = new HashMap<>();
-		metadata.put(PANEL_STACK_PROVIDER_CLASS, getClass().getName());
-		resource.setMetadata(metadata);
-		return resource;
-	}
-
-	// =========================================================================
-	// Archive mounting (private implementation)
-	// =========================================================================
-
-	private Path mountArchive(Path archivePath) throws IOException {
-		// If the archive itself lives inside another virtual filesystem (nested archive),
-		// we must materialize it to a real temp file first so we can open it.
-		Path mountSource = materializeArchiveIfNeeded(archivePath);
-		ArchiveType type = archiveType(archivePath);
-		if (type == null) {
-			return null;
-		}
-
-		if (type.usesNioZipFilesystem()) {
-			return mountNioZipFilesystem(mountSource, archivePath);
-		}
-
-		// TAR, RAR, GZIP — must be fully extracted to a temp directory
-		return mountByExtraction(mountSource, archivePath, type);
-	}
-
-	private Path mountNioZipFilesystem(Path archiveFile, Path originalArchivePath) throws IOException {
-		// Encrypted ZIPs cannot be opened by the NIO ZIP provider — extract instead
-		if (isEncryptedZip(archiveFile)) {
-			Path existingRoot = findExtractedRoot(originalArchivePath);
-			if (existingRoot != null) {
-				return existingRoot;
-			}
-			return extractEncryptedZipWithPrompt(archiveFile, originalArchivePath);
-		}
-
-		URI uri = URI.create("jar:" + archiveFile.toUri());
-
-		// Reuse an already-mounted filesystem if available
-		FileSystem existing = mountedFileSystems.get(uri);
-		if (existing != null && existing.isOpen()) {
-			return existing.getPath("/");
-		}
-
-		FileSystem newFs;
-		try {
-			newFs = FileSystems.newFileSystem(uri, Map.of());
-		} catch (IOException ex) {
-			if (shouldFallbackToZipExtraction(ex)) {
-				log.warn("Falling back to ZIP extraction for {}: {}", originalArchivePath, ex.getMessage());
-				Path existingRoot = findExtractedRoot(originalArchivePath);
-				if (existingRoot != null) {
-					return existingRoot;
-				}
-				Charset zipCharset = detectZipEntryCharset(archiveFile);
-				return extractToTempDir(archiveFile, originalArchivePath, "nuclr-zip-",
-						(src, target) -> extractZip(src, target, zipCharset));
-			}
-			throw ex;
-		}
-
-		// Guard against a race: another thread may have mounted it first
-		FileSystem previous = mountedFileSystems.putIfAbsent(uri, newFs);
-		if (previous != null && previous.isOpen()) {
-			try { newFs.close(); } catch (IOException ignored) { }
-			return previous.getPath("/");
-		}
-
-		mountedArchiveSources.put(newFs, originalArchivePath);
-		mountedArchiveBackingFiles.put(newFs, archiveFile);
-		return newFs.getPath("/");
-	}
-
-	private boolean shouldFallbackToZipExtraction(IOException error) {
-		Throwable current = error;
-		while (current != null) {
-			String message = current.getMessage();
-			if (message != null) {
-				String normalized = message.toLowerCase(Locale.ROOT);
-				if (normalized.contains("invalid cen header") || normalized.contains("bad entry name")) {
-					return true;
-				}
-			}
-			current = current.getCause();
-		}
+	@Override
+	public boolean singleton() {
+		// Each opened archive needs its own mount, so instances are not shared.
 		return false;
-	}
-
-	private Charset detectZipEntryCharset(Path archivePath) {
-		Charset bestCharset = Charset.forName("UTF-8");
-		int bestScore = Integer.MIN_VALUE;
-
-		for (Charset charset : LEGACY_ZIP_NAME_CHARSETS) {
-			try {
-				ZipFile zipFile = configuredZipFile(archivePath, charset);
-				int score = scoreZipNames(zipFile.getFileHeaders());
-				if (score > bestScore) {
-					bestScore = score;
-					bestCharset = charset;
-				}
-			} catch (Exception ex) {
-				log.debug("Cannot inspect ZIP names with charset {}: {}", charset, ex.getMessage());
-			}
-		}
-
-		log.info("Using ZIP entry charset {} for {}", bestCharset, archivePath);
-		return bestCharset;
-	}
-
-	private int scoreZipNames(List<net.lingala.zip4j.model.FileHeader> fileHeaders) {
-		int score = 0;
-		for (net.lingala.zip4j.model.FileHeader header : fileHeaders) {
-			String name = header != null ? header.getFileName() : null;
-			if (name == null || name.isBlank()) {
-				score -= 5;
-				continue;
-			}
-			score += scoreName(name);
-		}
-		return score;
-	}
-
-	private int scoreName(String name) {
-		int score = 0;
-		for (int i = 0; i < name.length(); i++) {
-			char ch = name.charAt(i);
-			if (isCyrillic(ch)) {
-				score += 4;
-			} else if (Character.isLetterOrDigit(ch)) {
-				score += 1;
-			} else if (" ./_+-()[]{}".indexOf(ch) >= 0) {
-				score += 0;
-			} else if ("¤¬ßÑГ".indexOf(ch) >= 0) {
-				score -= 4;
-			} else if (Character.isISOControl(ch) || ch == '\uFFFD') {
-				score -= 6;
-			}
-		}
-		return score;
-	}
-
-	private boolean isCyrillic(char ch) {
-		return Character.UnicodeBlock.of(ch) == Character.UnicodeBlock.CYRILLIC;
-	}
-
-	private ZipFile configuredZipFile(Path archivePath, Charset charset) {
-		ZipFile zipFile = new ZipFile(archivePath.toFile());
-		zipFile.setCharset(charset);
-		return zipFile;
-	}
-
-	private ZipFile configuredZipFile(Path archivePath, char[] password, Charset charset) {
-		ZipFile zipFile = new ZipFile(archivePath.toFile(), password);
-		zipFile.setCharset(charset);
-		return zipFile;
-	}
-
-	private Path mountByExtraction(Path archiveFile, Path originalArchivePath, ArchiveType type) throws IOException {
-		// Reuse an earlier extraction of the same archive
-		Path existingRoot = findExtractedRoot(originalArchivePath);
-		if (existingRoot != null) {
-			return existingRoot;
-		}
-		return extractToTempDir(archiveFile, originalArchivePath, "nuclr-archive-",
-				(src, target) -> extractArchive(src, type, target));
-	}
-
-	private int archiveDepth(FileSystem fileSystem) {
-		Path source = mountedArchiveSources.get(fileSystem);
-		if (source == null || source.getFileSystem().equals(FileSystems.getDefault())) {
-			return 0;
-		}
-		return 1 + archiveDepth(source.getFileSystem());
-	}
-
-	private void closeMountedFileSystem(FileSystem fileSystem) throws IOException {
-		if (fileSystem == null) {
-			return;
-		}
-
-		Path originalArchivePath = mountedArchiveSources.remove(fileSystem);
-		Path backingArchiveFile = mountedArchiveBackingFiles.remove(fileSystem);
-		mountedFileSystems.entrySet().removeIf(entry -> entry.getValue().equals(fileSystem));
-
-		if (fileSystem.isOpen()) {
-			fileSystem.close();
-		}
-
-		if (backingArchiveFile != null
-				&& originalArchivePath != null
-				&& !backingArchiveFile.equals(originalArchivePath)) {
-			Files.copy(backingArchiveFile, originalArchivePath, StandardCopyOption.REPLACE_EXISTING);
-		}
-	}
-
-	private Path resolveRelative(Path base, Path relative) {
-		Path result = base;
-		for (Path segment : relative) {
-			result = result.resolve(segment.toString());
-		}
-		return result;
-	}
-
-	@FunctionalInterface
-	private interface ArchiveExtractor {
-		void extract(Path source, Path targetDir) throws IOException;
-	}
-
-	private Path extractToTempDir(
-			Path archiveFile,
-			Path originalArchivePath,
-			String prefix,
-			ArchiveExtractor extractor) throws IOException {
-
-		Path tempDir = Files.createTempDirectory(prefix);
-		tempDir.toFile().deleteOnExit();
-		try {
-			extractor.extract(archiveFile, tempDir);
-			extractedArchiveRoots.put(tempDir, originalArchivePath);
-			return tempDir;
-		} catch (IOException | RuntimeException ex) {
-			deleteRecursively(tempDir);
-			throw ex;
-		}
-	}
-
-	private Path materializeArchiveIfNeeded(Path archivePath) throws IOException {
-		if (archivePath == null || archivePath.getFileSystem().equals(FileSystems.getDefault())) {
-			return archivePath;
-		}
-		return materializeFile(archivePath);
-	}
-
-	private boolean isEncryptedZip(Path archivePath) {
-		try {
-			return configuredZipFile(archivePath, Charset.forName("UTF-8")).isEncrypted();
-		} catch (Exception ignored) {
-			return false;
-		}
-	}
-
-	private Path findExtractedRoot(Path archivePath) {
-		return extractedArchiveRoots.entrySet().stream()
-				.filter(e -> archivePath.equals(e.getValue()))
-				.map(Map.Entry::getKey)
-				.filter(Files::isDirectory)
-				.findFirst()
-				.orElse(null);
-	}
-
-	/**
-	 * Show a password dialog for the given archive and return the entered password,
-	 * or {@code null} if the user cancels.
-	 *
-	 * <p>Safe to call from any thread — dispatches to the EDT via
-	 * {@link SwingUtilities#invokeAndWait} when called from a background thread,
-	 * because {@code openResource} is typically invoked on a virtual thread by
-	 * the Commander while the EDT stays free.
-	 */
-	private char[] promptForArchivePassword(Path archivePath) {
-		String archiveName = archivePath != null && archivePath.getFileName() != null
-				? archivePath.getFileName().toString()
-				: "archive";
-
-		char[][] result = { null };
-
-		Runnable showDialog = () -> {
-			JPasswordField passwordField = new JPasswordField(24);
-			// Request focus inside the dialog so the user can type immediately
-			passwordField.addAncestorListener(new javax.swing.event.AncestorListener() {
-				@Override public void ancestorAdded(javax.swing.event.AncestorEvent e) {
-					passwordField.requestFocusInWindow();
-				}
-				@Override public void ancestorRemoved(javax.swing.event.AncestorEvent e) { }
-				@Override public void ancestorMoved(javax.swing.event.AncestorEvent e) { }
-			});
-			int choice = JOptionPane.showConfirmDialog(
-					panel,
-					new Object[] { "Enter password for \"" + archiveName + "\":", passwordField },
-					"Archive Password",
-					JOptionPane.OK_CANCEL_OPTION,
-					JOptionPane.PLAIN_MESSAGE);
-			if (choice == JOptionPane.OK_OPTION) {
-				result[0] = passwordField.getPassword();
-			}
-		};
-
-		if (SwingUtilities.isEventDispatchThread()) {
-			showDialog.run();
-		} else {
-			try {
-				SwingUtilities.invokeAndWait(showDialog);
-			} catch (InterruptedException ex) {
-				Thread.currentThread().interrupt();
-			} catch (java.lang.reflect.InvocationTargetException ex) {
-				log.warn("Password dialog threw an exception", ex.getCause());
-			}
-		}
-
-		return result[0];
-	}
-
-	/**
-	 * Show an error dialog informing the user that the password they entered was wrong.
-	 * Safe to call from any thread.
-	 */
-	private void showArchivePasswordError(Path archivePath) {
-		String archiveName = archivePath != null && archivePath.getFileName() != null
-				? archivePath.getFileName().toString()
-				: "archive";
-
-		Runnable showDialog = () -> JOptionPane.showMessageDialog(
-				panel,
-				"Incorrect password for \"" + archiveName + "\". Please try again.",
-				"Wrong Password",
-				JOptionPane.ERROR_MESSAGE);
-
-		if (SwingUtilities.isEventDispatchThread()) {
-			showDialog.run();
-		} else {
-			SwingUtilities.invokeLater(showDialog);
-			// invokeLater is sufficient here because this is called from a catch block
-			// inside extractEncryptedZipWithPrompt, which loops back to the next prompt.
-			// The next prompt uses invokeAndWait, which implicitly waits for all prior
-			// invokeLater tasks to finish first, so the error dialog will always appear
-			// before the next password prompt.
-		}
-	}
-
-	private boolean isWrongPasswordError(Throwable error) {
-		Throwable current = error;
-		while (current != null) {
-			if (current instanceof ZipException zipException
-					&& zipException.getType() == ZipException.Type.WRONG_PASSWORD) {
-				return true;
-			}
-			String message = current.getMessage();
-			if (message != null && message.toLowerCase(Locale.ROOT).contains("wrong password")) {
-				return true;
-			}
-			current = current.getCause();
-		}
-		return false;
-	}
-
-	private static final class InvalidArchivePasswordException extends IOException {
-		private static final long serialVersionUID = 1L;
-
-		private InvalidArchivePasswordException(String message, Throwable cause) {
-			super(message, cause);
-		}
-	}
-
-	// =========================================================================
-	// Archive extraction (TAR, RAR, GZIP, encrypted ZIP)
-	// =========================================================================
-
-	private void extractArchive(Path archivePath, ArchiveType type, Path targetDir) throws IOException {
-		switch (type) {
-			case RAR   -> extractRar(archivePath, targetDir);
-			case TAR   -> extractTar(archivePath, targetDir);
-			case GZIP  -> extractGzip(archivePath, targetDir);
-			default    -> throw new IOException("Unsupported extraction type: " + type);
-		}
-	}
-
-	private void extractZip(Path archivePath, Path targetDir) throws IOException {
-		extractZip(archivePath, targetDir, Charset.forName("UTF-8"));
-	}
-
-	private void extractZip(Path archivePath, Path targetDir, Charset charset) throws IOException {
-		try {
-			configuredZipFile(archivePath, charset).extractAll(targetDir.toString());
-		} catch (Exception ex) {
-			if (isWrongPasswordError(ex)) {
-				throw new InvalidArchivePasswordException("Wrong password!", ex);
-			}
-			throw ex instanceof IOException ioEx ? ioEx : new IOException("Cannot extract ZIP", ex);
-		}
-	}
-
-	private void extractZip(Path archivePath, Path targetDir, char[] password) throws IOException {
-		extractZip(archivePath, targetDir, password, Charset.forName("UTF-8"));
-	}
-
-	private void extractZip(Path archivePath, Path targetDir, char[] password, Charset charset) throws IOException {
-		try {
-			configuredZipFile(archivePath, password, charset).extractAll(targetDir.toString());
-		} catch (Exception ex) {
-			if (isWrongPasswordError(ex)) {
-				throw new InvalidArchivePasswordException("Wrong password!", ex);
-			}
-			throw ex instanceof IOException ioEx ? ioEx : new IOException("Cannot extract ZIP", ex);
-		}
-	}
-
-	private Path extractEncryptedZipWithPrompt(Path archiveFile, Path originalArchivePath) throws IOException {
-		Charset zipCharset = detectZipEntryCharset(archiveFile);
-		while (true) {
-			char[] password = promptForArchivePassword(originalArchivePath);
-			if (password == null) {
-				return null;
-			}
-			try {
-				return runExtractionWithProgressIfOnEdt(archiveFile, originalArchivePath, password, zipCharset);
-			} catch (InvalidArchivePasswordException ex) {
-				log.info("Invalid password for archive {}", originalArchivePath);
-				showArchivePasswordError(originalArchivePath);
-			} finally {
-				Arrays.fill(password, '\0');
-			}
-		}
-	}
-
-	/**
-	 * Extract the encrypted ZIP archive with {@code password}, showing a modal
-	 * "please wait" dialog when called from the EDT so the UI doesn't appear frozen.
-	 *
-	 * <p>When called from a background thread the extraction runs synchronously on
-	 * that thread — no dialog is needed because the EDT is already free.
-	 *
-	 * <p>The modal dialog uses Swing's secondary event loop ({@code setVisible(true)}
-	 * on an {@code APPLICATION_MODAL} dialog) to keep the EDT alive and responsive
-	 * while the background virtual thread does the actual I/O work.
-	 */
-	private Path runExtractionWithProgressIfOnEdt(
-			Path archiveFile,
-			Path originalArchivePath,
-			char[] password,
-			Charset zipCharset) throws IOException {
-
-		IOException[] errorHolder  = { null };
-		Path[]        resultHolder = { null };
-
-		Runnable doExtract = () -> {
-			try {
-				resultHolder[0] = extractToTempDir(archiveFile, originalArchivePath, "nuclr-zip-",
-						(src, target) -> extractZip(src, target, password, zipCharset));
-			} catch (IOException ex) {
-				errorHolder[0] = ex;
-			}
-		};
-
-		if (!SwingUtilities.isEventDispatchThread()) {
-			// We are already on a background thread — the EDT is free.
-			// Extract synchronously right here.
-			doExtract.run();
-		} else {
-			// We are on the EDT.  Run extraction on a virtual thread and show a
-			// modal dialog so the EDT keeps pumping events (secondary event loop).
-			JDialog waitDialog = buildExtractionWaitDialog();
-			AtomicBoolean done = new AtomicBoolean(false);
-
-			Thread.ofVirtual().start(() -> {
-				doExtract.run();
-				done.set(true);
-				// Dispose on the EDT to close the secondary event loop.
-				SwingUtilities.invokeLater(waitDialog::dispose);
-			});
-
-			// setVisible(true) blocks the EDT here via secondary event loop.
-			// It unblocks when waitDialog.dispose() is called above.
-			if (!done.get()) {
-				waitDialog.setVisible(true);
-			}
-		}
-
-		if (errorHolder[0] != null) {
-			throw errorHolder[0];
-		}
-		return resultHolder[0];
-	}
-
-	/**
-	 * Build the modal "Extracting Archive…" dialog shown while the extraction
-	 * virtual thread is running.  The dialog has no controls — the user must wait.
-	 */
-	private JDialog buildExtractionWaitDialog() {
-		Window owner = panel != null ? SwingUtilities.getWindowAncestor(panel) : null;
-		JDialog dialog = new JDialog(owner, "Extracting Archive", Dialog.ModalityType.APPLICATION_MODAL);
-		dialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
-
-		JLabel label = new JLabel("Decrypting and extracting, please wait\u2026");
-		label.setBorder(BorderFactory.createEmptyBorder(24, 32, 24, 32));
-		dialog.add(label, BorderLayout.CENTER);
-
-		dialog.pack();
-		dialog.setResizable(false);
-		dialog.setLocationRelativeTo(panel);
-		return dialog;
-	}
-
-	private void extractTar(Path archivePath, Path targetDir) throws IOException {
-		try (InputStream raw = Files.newInputStream(archivePath);
-			 TarArchiveInputStream tar = new TarArchiveInputStream(new BufferedInputStream(raw))) {
-			extractTarStream(tar, targetDir);
-		}
-	}
-
-	private void extractGzip(Path archivePath, Path targetDir) throws IOException {
-		try (InputStream raw = Files.newInputStream(archivePath);
-			 GzipCompressorInputStream gz = new GzipCompressorInputStream(new BufferedInputStream(raw))) {
-
-			String name = archivePath.getFileName() == null
-					? ""
-					: archivePath.getFileName().toString().toLowerCase(Locale.ROOT);
-
-			if (name.endsWith(".tar.gz") || name.endsWith(".tgz")) {
-				try (TarArchiveInputStream tar = new TarArchiveInputStream(gz)) {
-					extractTarStream(tar, targetDir);
-				}
-				return;
-			}
-
-			// Plain .gz — decompress the single wrapped file
-			String outputName = stripGzExtension(
-					archivePath.getFileName() == null ? "archive.gz" : archivePath.getFileName().toString());
-			Path outputPath = safeResolve(targetDir, outputName);
-			ensureParentDirs(outputPath);
-			try (var out = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-				IOUtils.copy(gz, out);
-			}
-		}
-	}
-
-	private void extractTarStream(TarArchiveInputStream tar, Path targetDir) throws IOException {
-		TarArchiveEntry entry;
-		while ((entry = tar.getNextTarEntry()) != null) {
-			if (entry.isSymbolicLink()) {
-				// Skip symlinks — their targets may not exist in the extraction dir
-				log.debug("Skipping TAR symlink: {}", entry.getName());
-				continue;
-			}
-			Path outputPath = safeResolve(targetDir, entry.getName());
-			if (outputPath == null) {
-				log.warn("Skipping unsafe TAR entry: {}", entry.getName());
-				continue;
-			}
-			if (entry.isDirectory()) {
-				Files.createDirectories(outputPath);
-			} else {
-				ensureParentDirs(outputPath);
-				try (var out = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-					IOUtils.copy(tar, out);
-				}
-			}
-		}
-	}
-
-	private void extractRar(Path archivePath, Path targetDir) throws IOException {
-		try (Archive rar = new Archive(archivePath.toFile())) {
-			FileHeader entry;
-			while ((entry = rar.nextFileHeader()) != null) {
-				String entryName = entry.getFileNameString();
-				Path outputPath = safeResolve(targetDir, entryName);
-				if (outputPath == null) {
-					log.warn("Skipping unsafe RAR entry: {}", entryName);
-					continue;
-				}
-				if (entry.isDirectory()) {
-					Files.createDirectories(outputPath);
-				} else {
-					ensureParentDirs(outputPath);
-					try (var out = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-						rar.extractFile(entry, out);
-					}
-				}
-			}
-		} catch (Exception ex) {
-			throw ex instanceof IOException ioEx ? ioEx : new IOException("Cannot extract RAR archive", ex);
-		}
-	}
-
-	// =========================================================================
-	// Path safety & helpers
-	// =========================================================================
-
-	/**
-	 * Resolve {@code entryName} under {@code targetDir}, rejecting path-traversal
-	 * attacks (entries containing ".." or absolute paths).
-	 *
-	 * @return the resolved path, or {@code null} if the entry is unsafe
-	 */
-	private static Path safeResolve(Path targetDir, String entryName) {
-		if (entryName == null || entryName.isBlank()) {
-			return null;
-		}
-		// Normalize separators and strip leading slashes
-		String normalized = entryName.replace('\\', '/');
-		while (normalized.startsWith("/")) {
-			normalized = normalized.substring(1);
-		}
-		if (normalized.isBlank()) {
-			return null;
-		}
-		Path resolved = targetDir.resolve(normalized).normalize();
-		// Reject path traversal
-		return resolved.startsWith(targetDir.normalize()) ? resolved : null;
-	}
-
-	private static void ensureParentDirs(Path path) throws IOException {
-		Path parent = path.getParent();
-		if (parent != null) {
-			Files.createDirectories(parent);
-		}
-	}
-
-	private static String stripGzExtension(String fileName) {
-		String lower = fileName.toLowerCase(Locale.ROOT);
-		if (lower.endsWith(".gz") && fileName.length() > 3) {
-			return fileName.substring(0, fileName.length() - 3);
-		}
-		return fileName + ".out";
-	}
-
-	// =========================================================================
-	// Archive type classification
-	// =========================================================================
-
-	private ArchiveType archiveType(Path path) {
-		if (path == null || path.getFileName() == null) {
-			return null;
-		}
-		String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
-
-		if (name.endsWith(".tar.gz") || name.endsWith(".tgz")) {
-			return ArchiveType.GZIP;
-		}
-		if (ZIP_FAMILY_EXTENSIONS.stream().anyMatch(name::endsWith)) {
-			return ArchiveType.ZIP_FAMILY;
-		}
-		if (name.endsWith(".rar")) {
-			return ArchiveType.RAR;
-		}
-		if (name.endsWith(".tar")) {
-			return ArchiveType.TAR;
-		}
-		if (name.endsWith(".gz")) {
-			return ArchiveType.GZIP;
-		}
-		return null;
-	}
-
-	private enum ArchiveType {
-		ZIP_FAMILY, RAR, TAR, GZIP;
-
-		/** Only ZIP-family archives are mounted via the Java NIO ZIP filesystem. */
-		boolean usesNioZipFilesystem() {
-			return this == ZIP_FAMILY;
-		}
-	}
-
-	// =========================================================================
-	// Recursive delete (used during unload cleanup)
-	// =========================================================================
-
-	private void deleteRecursively(Path root) {
-		try (var stream = Files.walk(root)) {
-			stream.sorted(Comparator.reverseOrder()).forEach(path -> {
-				try { Files.deleteIfExists(path); } catch (IOException ignored) { }
-			});
-		} catch (IOException ignored) { }
-	}
-
-	// =========================================================================
-	// Event payload helpers
-	// =========================================================================
-
-	@SuppressWarnings("unchecked")
-	private static List<NuclrResourcePath> extractResourceList(Map<String, Object> event, String key) {
-		if (event == null) {
-			return List.of();
-		}
-		Object value = event.get(key);
-		if (value instanceof List<?> list) {
-			return (List<NuclrResourcePath>) list;
-		}
-		return List.of();
-	}
-
-	@Override
-	public NuclrResourcePath getCurrentResource() {
-		return this.panel.getCurrentResource();
 	}
 
 	@Override
 	public String uuid() {
 		return uuid;
+	}
+
+	// =========================================================================
+	// Helpers
+	// =========================================================================
+
+	private static boolean isCancelled(AtomicBoolean cancelled) {
+		return cancelled != null && cancelled.get();
+	}
+
+	private void deleteRecursively(Path root) {
+		if (!Files.exists(root)) {
+			return;
+		}
+		try (var walk = Files.walk(root)) {
+			walk.sorted(Comparator.reverseOrder()).forEach(path -> {
+				try {
+					Files.deleteIfExists(path);
+				} catch (IOException e) {
+					log.warn("Failed to delete temp archive file {}: {}", path, e.getMessage());
+				}
+			});
+		} catch (IOException e) {
+			log.warn("Failed to walk temp archive dir {}: {}", root, e.getMessage());
+		}
+	}
+
+	private char[] promptPassword(String archiveName, boolean retry) {
+
+		final char[][] result = new char[1][];
+
+		final Runnable prompt = () -> {
+			final var passwordField = new JPasswordField(20);
+			final var panel = new JPanel(new java.awt.BorderLayout(0, 8));
+			final String message = (retry ? "Wrong password. " : "") + "Enter password for \"" + archiveName + "\":";
+			panel.add(new JLabel(message), java.awt.BorderLayout.NORTH);
+			panel.add(passwordField, java.awt.BorderLayout.CENTER);
+
+			final int choice = JOptionPane.showConfirmDialog(null, panel, "Encrypted Archive",
+					JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+
+			if (choice == JOptionPane.OK_OPTION) {
+				result[0] = passwordField.getPassword();
+			}
+		};
+
+		runOnEdtAndWait(prompt);
+
+		return result[0] != null && result[0].length > 0 ? result[0] : null;
+	}
+
+	private void showError(String title, String message) {
+		runOnEdtAndWait(() -> JOptionPane.showMessageDialog(null, message, title, JOptionPane.ERROR_MESSAGE));
+	}
+
+	private static void runOnEdtAndWait(Runnable runnable) {
+		if (SwingUtilities.isEventDispatchThread()) {
+			runnable.run();
+			return;
+		}
+		try {
+			SwingUtilities.invokeAndWait(runnable);
+		} catch (Exception e) {
+			log.warn("Failed to run dialog on EDT: {}", e.getMessage());
+		}
+	}
+
+	@Override
+	public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
+			NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+		
+		
+		
 	}
 }
