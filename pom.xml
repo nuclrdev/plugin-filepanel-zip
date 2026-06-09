@@ -15,6 +15,8 @@
 	<properties>
 		<maven.compiler.source>21</maven.compiler.source>
 		<maven.compiler.target>21</maven.compiler.target>
+		<jarsigner.keystorepath>C:/nuclr/key/nuclr-signing.p12</jarsigner.keystorepath>
+		<jarsigner.keyalias>nuclr</jarsigner.keyalias>
 	</properties>
 
 	<dependencies>
@@ -59,6 +61,23 @@
 		</dependency>
 	</dependencies>
 	<build>
+		<resources>
+			<resource>
+				<directory>src/main/resources</directory>
+				<filtering>true</filtering>
+				<includes>
+					<include>plugin.properties</include>
+				</includes>
+			</resource>
+			<resource>
+				<directory>src/main/resources</directory>
+				<filtering>false</filtering>
+				<excludes>
+					<exclude>plugin.properties</exclude>
+				</excludes>
+			</resource>
+		</resources>
+
 		<plugins>
 
 			<!-- Build the plugin jar (normal jar) -->
@@ -161,13 +180,15 @@
 								<script><![CDATA[
 import java.security.*
 
-def storepass = project.properties['jarsigner.storepass']
+def storepass = System.getProperty('jarsigner.storepass') ?: project.properties['jarsigner.storepass']
+def keystorePath = System.getProperty('jarsigner.keystorepath') ?: project.properties['jarsigner.keystorepath']
+def keyAlias = System.getProperty('jarsigner.keyalias') ?: project.properties['jarsigner.keyalias']
 def ks = KeyStore.getInstance("PKCS12")
-new FileInputStream("C:/nuclr/key/nuclr-signing.p12").withStream {
+new FileInputStream(keystorePath).withStream {
 	ks.load(it, storepass.toCharArray())
 }
 
-def key = ks.getKey("nuclr", storepass.toCharArray())
+def key = ks.getKey(keyAlias, storepass.toCharArray())
 def sig = Signature.getInstance("SHA256withRSA")
 sig.initSign(key)
 

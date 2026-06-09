@@ -41,10 +41,13 @@ import javax.swing.JPasswordField;
 import javax.swing.SwingUtilities;
 
 import dev.nuclr.platform.events.NuclrEventListener;
+import dev.nuclr.platform.plugin.BaseNuclrPlugin;
 import dev.nuclr.platform.plugin.FilePanelNuclrPlugin;
+import dev.nuclr.platform.plugin.NuclrMenuResource;
 import dev.nuclr.platform.plugin.NuclrPluginCallback;
 import dev.nuclr.platform.plugin.NuclrPluginContext;
 import dev.nuclr.platform.plugin.NuclrResource;
+import dev.nuclr.plugin.core.mount.zip.service.DeleteService;
 import dev.nuclr.plugin.core.mount.zip.service.MakeNewFolderService;
 import lombok.extern.slf4j.Slf4j;
 
@@ -71,7 +74,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	public static final String PluginId = "dev.nuclr.plugin.core.mount.zip";
 	private static final String PluginName = "Archive Panel";
-	private static final String PluginVersion = "1.0.0";
+	private static final String PluginVersion = loadVersion();
 	private static final String PluginDescription = "Browse ZIP, JAR, WAR, EAR, RAR, TAR and GZIP archives in the file panel.";
 	private static final String PluginAuthor = "Nuclr Development Team";
 	private static final String PluginLicense = "Apache-2.0";
@@ -85,7 +88,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private static final String EventPluginUnload = "plugin.unload";
 
 	// -------------------------------------------------------------------------
-	// Runtime state — one instance backs one mounted/extracted archive
+	// Runtime state â€” one instance backs one mounted/extracted archive
 	// -------------------------------------------------------------------------
 
 	private final String uuid = UUID.randomUUID().toString();
@@ -363,7 +366,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			log.error("Failed to list archive directory {}: {}", dir, e.getMessage(), e);
 		}
 
-		// Folders first, then files, both alphabetically — a familiar panel order.
+		// Folders first, then files, both alphabetically â€” a familiar panel order.
 		children.sort(Comparator.comparing((NuclrResource r) -> !r.isFolder())
 				.thenComparing(r -> r.getName(), String.CASE_INSENSITIVE_ORDER));
 
@@ -393,6 +396,11 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	@Override
 	public void handleMessage(Object source, String type, Map<String, Object> eventData, NuclrPluginCallback callback) {
 
+		if (("delete".equals(type) || "deletePermanent".equals(type)) && eventData != null) {
+			handleDelete(eventData, callback);
+			return;
+		}
+
 		if ("filepanel.makeFolder".equals(type) && eventData != null) {
 			if (!focused || currentFolder == null) {
 				return;
@@ -413,9 +421,98 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 	}
 
+	@SuppressWarnings("unchecked")
+	private void handleDelete(Map<String, Object> eventData, NuclrPluginCallback callback) {
+
+		// Delivered directly to this (focused) panel's plugin by the commander, so no focus guard
+		// is needed â€” the broadcast that used to require it no longer happens.
+		if (!(eventData.get("sources") instanceof List<?> list) || list.isEmpty()) {
+			return;
+		}
+
+		// Entries can only be removed from a writable NIO Zip mount; temp-extracted views
+		// (RAR/TAR/encrypted) are read-only, so deleting from them would only touch the
+		// throwaway extraction and never the original archive.
+		if (!isWritableArchive()) {
+			showError("Delete", "This archive view is read-only.");
+			return;
+		}
+
+		List<NuclrResource> sources = (List<NuclrResource>) list;
+
+		// Plugin-rendered confirmation listing the full paths to be deleted.
+		if (!DeleteDialogs.confirmDelete(sources)) {
+			return;
+		}
+
+		DeleteService.delete(sources, callback, (item, e) -> DeleteDialogs.error(item.getName(), e));
+	}
+
 	@Override
 	public boolean isMessageSupported(String type) {
-		return "filepanel.makeFolder".equals(type);
+		return "filepanel.makeFolder".equals(type) || "delete".equals(type) || "deletePermanent".equals(type);
+	}
+
+	@Override
+	public List<NuclrMenuResource> menuItems(NuclrResource source) {
+
+		// Mirror the local-filesystem panel's function-bar menu so the archive view behaves the
+		// same way. In particular this provides Delete (F8) and Delete Permanently (Shift+F8),
+		// which is how those keys reach the delete logic (the function-key bar dispatches them).
+		var items = new ArrayList<NuclrMenuResource>();
+
+		boolean isDirectory = source != null && source.getPath() != null && Files.isDirectory(source.getPath());
+
+		addDefaultMenuItems(items, isDirectory);
+		addAltMenuItems(items);
+		addCtrlMenuItems(items);
+		addShiftMenuItems(items);
+
+		return items;
+	}
+
+	private static void addDefaultMenuItems(List<NuclrMenuResource> items, boolean isDirectory) {
+		items.add(menu("View", "F3", "view"));
+		items.add(menu("Edit", "F4", "edit"));
+		items.add(menu("Copy", "F5", "copy"));
+		items.add(menu(isDirectory ? "Move" : "Rename/Move", "F6", "move"));
+		items.add(menu("Make Folder", "F7", "filepanel.makeFolder"));
+		items.add(menu("Delete", "F8", "delete"));
+		items.add(menu("Quit", "F10", "quit"));
+		items.add(menu("Plugins", "F11", "plugins"));
+		items.add(menu("Screen", "F12", "screen"));
+	}
+
+	private static void addAltMenuItems(List<NuclrMenuResource> items) {
+		items.add(menu("Left Panel", "Alt+F1", "left"));
+		items.add(menu("Right Panel", "Alt+F2", "right"));
+		items.add(menu("Find", "Alt+F7", "find"));
+		items.add(menu("History", "Alt+F8", "history"));
+		items.add(menu("Fullscreen", "Alt+F9", "fullscreen"));
+		items.add(menu("Tree", "Alt+F10", "tree"));
+		items.add(menu("View History", "Alt+F11", "viewHistory"));
+		items.add(menu("Folder History", "Alt+F12", "folderHistory"));
+	}
+
+	private static void addCtrlMenuItems(List<NuclrMenuResource> items) {
+		items.add(menu("Hide Left", "Ctrl+F1", "hideLeft"));
+		items.add(menu("Hide Right", "Ctrl+F2", "hideRight"));
+		items.add(menu("Sort by name", "Ctrl+F3", "sortByName"));
+		items.add(menu("Sort by extension", "Ctrl+F4", "sortByExtension"));
+		items.add(menu("Sort by modified", "Ctrl+F5", "sortByModifiedDate"));
+		items.add(menu("Sort by size", "Ctrl+F6", "sortBySize"));
+		items.add(menu("Unsort", "Ctrl+F7", "unsort"));
+		items.add(menu("Sort by create", "Ctrl+F8", "sortByCreateDate"));
+		items.add(menu("Sort by access", "Ctrl+F9", "sortByAccessTime"));
+		items.add(menu("Sort menu", "Ctrl+F12", "sortMenu"));
+	}
+
+	private static void addShiftMenuItems(List<NuclrMenuResource> items) {
+		items.add(menu("Delete Permanently", "Shift+F8", "deletePermanent"));
+	}
+
+	private static NuclrMenuResource menu(String name, String functionKey, String eventType) {
+		return new NuclrMenuResource(name, functionKey, eventType);
 	}
 
 	private boolean isWritableArchive() {
@@ -598,6 +695,16 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	public String version() {
 		return PluginVersion;
 	}
+	private static String loadVersion() {
+		try (var stream = ZipFilePanelPlugin.class.getResourceAsStream("/plugin.properties")) {
+			if (stream == null) return "unknown";
+			var props = new java.util.Properties();
+			props.load(stream);
+			return props.getProperty("version", "unknown");
+		} catch (java.io.IOException e) {
+			return "unknown";
+		}
+	}
 
 	@Override
 	public String description() {
@@ -708,5 +815,13 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		} catch (Exception e) {
 			log.warn("Failed to run dialog on EDT: {}", e.getMessage());
 		}
+	}
+
+	@Override
+	public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
+			NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+		
+		
+		
 	}
 }
