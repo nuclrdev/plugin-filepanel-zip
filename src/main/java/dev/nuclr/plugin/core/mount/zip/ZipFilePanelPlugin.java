@@ -527,8 +527,10 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	// =========================================================================
 
 	@Override
-	public boolean supports(Path path) {
+	public boolean supports(NuclrResource resource) {
 
+		var path = resource != null ? resource.getPath() : null;
+		
 		if (path == null) {
 			return archiveRootPath != null && !closing;
 		}
