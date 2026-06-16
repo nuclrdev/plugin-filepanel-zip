@@ -40,11 +40,11 @@ import dev.nuclr.platform.plugin.NuclrResource;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
-public final class FileNuclrResource extends NuclrResource {
+public final class ZipFileNuclrResource extends NuclrResource {
 
 	public static final List<String> ColumnNames = List.of("Name", "Size", "Date", "Time");
 
-	public FileNuclrResource(NuclrPluginContext ctx, Path path) {
+	public ZipFileNuclrResource(NuclrPluginContext ctx, Path path) {
 
 		super(path);
 

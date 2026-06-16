@@ -56,9 +56,9 @@ final class ArchiveNuclrResource {
 	}
 
 	/** Build a resource describing a path inside an archive. */
-	public static FileNuclrResource build(NuclrPluginContext ctx, final Path path) {
+	public static ZipFileNuclrResource build(NuclrPluginContext ctx, final Path path) {
 
-		final var r = new FileNuclrResource(ctx, path);
+		final var r = new ZipFileNuclrResource(ctx, path);
 
 		try {
 			final var fileName = path.getFileName();
@@ -84,7 +84,7 @@ final class ArchiveNuclrResource {
 	 * Build the resource shown for the archive root. Uses the original archive
 	 * file name as the display name (the NIO root path has no file name).
 	 */
-	public static FileNuclrResource buildRoot(NuclrPluginContext ctx, final Path rootPath, final String displayName) {
+	public static ZipFileNuclrResource buildRoot(NuclrPluginContext ctx, final Path rootPath, final String displayName) {
 		final var r = build(ctx, rootPath);
 		r.setName(displayName);
 		r.setFolder(true);
@@ -95,7 +95,7 @@ final class ArchiveNuclrResource {
 	 * Build the {@code ".."} entry that navigates up to {@code parentPath} inside
 	 * the archive.
 	 */
-	public static FileNuclrResource buildParent(NuclrPluginContext ctx, final Path parentPath) {
+	public static ZipFileNuclrResource buildParent(NuclrPluginContext ctx, final Path parentPath) {
 		final var r = build(ctx, parentPath);
 		r.setFolder(true);
 		r.setName("..");
@@ -106,8 +106,8 @@ final class ArchiveNuclrResource {
 	 * Build the {@code ".."} entry shown at the archive root: opening it closes
 	 * the archive and pops the panel layer rather than navigating.
 	 */
-	public static FileNuclrResource buildCloseParent(NuclrPluginContext ctx, Path archiveFile) {
-		final var r = new FileNuclrResource(ctx, archiveFile);
+	public static ZipFileNuclrResource buildCloseParent(NuclrPluginContext ctx, Path archiveFile) {
+		final var r = new ZipFileNuclrResource(ctx, archiveFile);
 		r.getMetadata().put(KeyCloseArchive, Boolean.TRUE);
 		r.setPath(null);
 		r.setFolder(true);
