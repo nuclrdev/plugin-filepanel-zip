@@ -21,6 +21,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.file.FileSystem;
+import java.nio.file.FileSystemAlreadyExistsException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -86,6 +87,10 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	/** Commander event emitted to unload this panel layer (see {@code Events}). */
 	private static final String EventPluginUnload = "plugin.unload";
+	private static final String ActionCopy = "filepanel.copy";
+	private static final String ActionAcceptCopy = "accept.copy";
+	private static final String ActionClipboardCopy = "clipboard.copy";
+	private static final String ActionClipboardPaste = "clipboard.paste";
 
 	// -------------------------------------------------------------------------
 	// Runtime state â€” one instance backs one mounted/extracted archive
@@ -120,6 +125,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	/** Temp files created when materialising nested archives, for cleanup. */
 	private final List<Path> materializedTempFiles = new CopyOnWriteArrayList<>();
+
+	/** Default-filesystem copies placed on the system clipboard. */
+	private final List<Path> clipboardTempDirs = new CopyOnWriteArrayList<>();
 
 	// =========================================================================
 	// Lifecycle
@@ -173,6 +181,11 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 		materializedTempFiles.clear();
 
+		for (var temp : clipboardTempDirs) {
+			ArchiveClipboardService.deleteRecursively(temp);
+		}
+		clipboardTempDirs.clear();
+
 		log.info("Archive panel plugin unloaded");
 	}
 
@@ -215,7 +228,10 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 				return openArchive(target);
 			}
 
-		} catch (IOException e) {
+		} catch (Exception e) {
+			// Plugin boundary: decode errors from broken archives surface as
+			// runtime exceptions, not only IOException — none may escape to the
+			// commander.
 			log.error("Failed to open archive resource {}: {}", target, e.getMessage(), e);
 			showError("Could not open archive", e.getMessage());
 		}
@@ -226,6 +242,11 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	/** Mount or extract an archive file and return its root listing. */
 	private NuclrResourceData openArchive(Path target) throws IOException {
 
+		// Set these before any password prompt so cancellation can pop this newly
+		// created panel and restore/select the archive in its parent panel.
+		this.archiveFile = target;
+		this.archiveDisplayName = target.getFileName() != null ? target.getFileName().toString() : target.toString();
+
 		// If the archive lives inside another virtual filesystem, copy it out first.
 		Path realFile = materializeIfNeeded(target);
 
@@ -234,12 +255,12 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		final Path root = type.usesNioZipFilesystem() ? openZipFamily(realFile) : extractArchive(realFile, type);
 
 		if (root == null) {
+			closing = true;
+			emitArchiveClosed();
 			return null;
 		}
 
-		this.archiveFile = target;
 		this.archiveRootPath = root;
-		this.archiveDisplayName = target.getFileName() != null ? target.getFileName().toString() : target.toString();
 		this.currentFolder = ArchiveNuclrResource.buildRoot(context, root, archiveDisplayName);
 		this.closing = false;
 
@@ -255,6 +276,17 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		if (ArchiveExtractor.isEncrypted(file)) {
 			return extractEncryptedZip(file);
+		}
+
+		// Archives written with Windows-style backslash separators in entry names
+		// (against the ZIP spec) cannot be browsed via the NIO ZipFileSystem, which
+		// treats '\' as a literal character and so collapses nested paths into flat,
+		// unnavigable root entries. Extract instead to rebuild the real folder tree.
+		if (ArchiveExtractor.hasBackslashEntryNames(file)) {
+			log.info("ZIP {} uses backslash separators; extracting to rebuild the folder tree",
+					file.getFileName());
+			final Charset detected = ArchiveExtractor.detectZipEntryCharset(file);
+			return extractToTempDir(dir -> ArchiveExtractor.extractZipNormalizingSeparators(file, dir, detected));
 		}
 
 		try {
@@ -277,9 +309,16 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	private Path mountZip(Path file, Charset charset) throws IOException {
 		final Map<String, ?> env = charset == null ? Map.of() : Map.of("encoding", charset.name());
-		final FileSystem fs = FileSystems.newFileSystem(file, env);
-		this.mountedFileSystem = fs;
-		return fs.getPath("/");
+		try {
+			final FileSystem fs = FileSystems.newFileSystem(file, env);
+			this.mountedFileSystem = fs;
+			return fs.getPath("/");
+		} catch (FileSystemAlreadyExistsException e) {
+			// The same archive is already mounted (e.g. open in the other panel).
+			// Surface as IOException so the caller's fallback chain lands on temp
+			// extraction, giving this panel an independent read-only view.
+			throw new IOException("Archive is already mounted: " + file, e);
+		}
 	}
 
 	private Path extractEncryptedZip(Path file) throws IOException {
@@ -318,7 +357,16 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private Path extractToTempDir(ExtractionTask task) throws IOException {
 		final Path dir = Files.createTempDirectory("nuclr-archive-" + UUID.randomUUID());
 		this.extractedTempDir = dir;
-		task.extract(dir);
+		try {
+			task.extract(dir);
+		} catch (IOException | RuntimeException e) {
+			// A failed attempt (corrupt archive, wrong password) must not orphan
+			// the partly-filled dir: the field is overwritten on the next attempt,
+			// after which unload() would never delete this one.
+			this.extractedTempDir = null;
+			deleteRecursively(dir);
+			throw e;
+		}
 		return dir;
 	}
 
@@ -388,7 +436,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		var event = new HashMap<String, Object>();
 		event.put("uuid", uuid);
 		if (archiveFile != null) {
-			event.put("selectionResource", archiveFile);
+			event.put("selectionResource", ArchiveNuclrResource.build(context, archiveFile));
 		}
 		context.getEventBus().emit(this, EventPluginUnload, event);
 	}
@@ -474,7 +522,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private static void addDefaultMenuItems(List<NuclrMenuResource> items, boolean isDirectory) {
 		items.add(menu("View", "F3", "view"));
 		items.add(menu("Edit", "F4", "edit"));
-		items.add(menu("Copy", "F5", "copy"));
+		items.add(menu("Copy", "F5", ActionCopy));
 		items.add(menu(isDirectory ? "Move" : "Rename/Move", "F6", "move"));
 		items.add(menu("Make Folder", "F7", "filepanel.makeFolder"));
 		items.add(menu("Delete", "F8", "delete"));
@@ -779,7 +827,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 	}
 
-	private char[] promptPassword(String archiveName, boolean retry) {
+	char[] promptPassword(String archiveName, boolean retry) {
 
 		final char[][] result = new char[1][];
 
@@ -822,8 +870,77 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	@Override
 	public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
 			NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
-		
-		
-		
+		if (ActionCopy.equals(actionType)) {
+			BaseNuclrPlugin destination = other == null || other.uuid().equals(uuid)
+					|| other.is(BaseNuclrPlugin.Type.QuickView) ? this : other;
+			destination.act(null, ActionAcceptCopy, selectedResources, focusedResource, data, callback);
+			return;
+		}
+
+		if (ActionAcceptCopy.equals(actionType)) {
+			copyIntoArchive(ArchiveCopyService.selectedPaths(selectedResources, focusedResource), callback);
+			return;
+		}
+
+		if (ActionClipboardCopy.equals(actionType)) {
+			copyToClipboard(selectedResources, focusedResource);
+			return;
+		}
+
+		if (ActionClipboardPaste.equals(actionType)) {
+			copyIntoArchive(ArchiveClipboardService.readPaths(), callback);
+		}
+	}
+
+	private void copyIntoArchive(List<Path> sources, NuclrPluginCallback callback) {
+		if (!isWritableArchive()) {
+			showError("Copy", "This archive view is read-only.");
+			return;
+		}
+		Path destination = currentFolder != null ? currentFolder.getPath() : null;
+		if (sources == null || sources.isEmpty()) {
+			return;
+		}
+		try {
+			if (ArchiveCopyService.copyInto(destination, sources, callback)) {
+				context.getEventBus().emit("refresh.plugin.file.panel", Map.of("plugin.uuid", uuid), null);
+			}
+		} catch (IOException | RuntimeException e) {
+			log.error("Failed to copy into archive {}: {}", archiveDisplayName, e.getMessage(), e);
+			if (callback != null) {
+				callback.onError("Could not copy into archive", e instanceof Exception ex ? ex : new IOException(e));
+			}
+			showError("Copy", e.getMessage());
+		}
+	}
+
+	private void copyToClipboard(List<NuclrResource> selectedResources, NuclrResource focusedResource) {
+		List<Path> paths = ArchiveCopyService.selectedPaths(selectedResources, focusedResource);
+		if (paths.isEmpty()) {
+			return;
+		}
+		List<String> displayPaths = paths.stream().map(this::archiveDisplayPath).toList();
+		try {
+			Path temp = ArchiveClipboardService.copy(paths, displayPaths);
+			if (temp != null) {
+				clipboardTempDirs.add(temp);
+			}
+		} catch (IOException | RuntimeException e) {
+			log.error("Failed to copy archive entries to clipboard: {}", e.getMessage(), e);
+			showError("Clipboard Copy", e.getMessage());
+		}
+	}
+
+	private String archiveDisplayPath(Path path) {
+		String prefix = archiveFile != null ? archiveFile.toAbsolutePath().normalize().toString() : archiveDisplayName;
+		if (archiveRootPath == null) {
+			return prefix;
+		}
+		try {
+			String relative = archiveRootPath.relativize(path).toString().replace('\\', '/');
+			return relative.isEmpty() ? prefix : prefix + "!/" + relative;
+		} catch (RuntimeException e) {
+			return path.toString();
+		}
 	}
 }

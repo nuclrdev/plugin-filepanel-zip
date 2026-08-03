@@ -1,0 +1,196 @@
+package dev.nuclr.plugin.core.mount.zip;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.IOException;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import dev.nuclr.platform.NuclrSettings;
+import dev.nuclr.platform.NuclrThemeScheme;
+import dev.nuclr.platform.events.NuclrEventBus;
+import dev.nuclr.platform.events.NuclrEventListener;
+import dev.nuclr.platform.plugin.BaseNuclrPlugin;
+import dev.nuclr.platform.plugin.NuclrPluginCallback;
+import dev.nuclr.platform.plugin.NuclrPluginContext;
+import dev.nuclr.platform.plugin.NuclrResource;
+import net.lingala.zip4j.ZipFile;
+import net.lingala.zip4j.model.enums.EncryptionMethod;
+import net.lingala.zip4j.model.ZipParameters;
+
+class ArchiveCopyServiceTest {
+
+	@TempDir
+	Path tempDir;
+
+	@Test
+	void copiesFilesAndFoldersAcrossFilesystemProviders() throws Exception {
+		Path sourceDir = Files.createDirectories(tempDir.resolve("folder/nested"));
+		Files.writeString(sourceDir.resolve("one.txt"), "one");
+		Files.writeString(sourceDir.getParent().resolve("top.txt"), "top");
+		Path archive = tempDir.resolve("target.zip");
+
+		try (var zip = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			assertTrue(ArchiveCopyService.copyInto(zip.getPath("/"),
+					List.of(sourceDir.getParent().resolve("top.txt"), sourceDir.getParent()), null));
+			assertEquals("top", Files.readString(zip.getPath("/top.txt")));
+			assertEquals("one", Files.readString(zip.getPath("/folder/nested/one.txt")));
+		}
+
+		try (var zip = FileSystems.newFileSystem(archive)) {
+			Path output = Files.createDirectory(tempDir.resolve("output"));
+			assertTrue(ArchiveCopyService.copyInto(output, List.of(zip.getPath("/folder")), null));
+			assertEquals("one", Files.readString(output.resolve("folder/nested/one.txt")));
+		}
+	}
+
+	@Test
+	void selfCopyGetsANewNameInsteadOfOverwritingItsSource() throws Exception {
+		Path file = Files.writeString(tempDir.resolve("note.txt"), "content");
+
+		assertTrue(ArchiveCopyService.copyInto(tempDir, List.of(file), null));
+
+		assertEquals("content", Files.readString(file));
+		assertEquals("content", Files.readString(tempDir.resolve("note (copy).txt")));
+	}
+
+	@Test
+	void clipboardTextAcceptsOnlyExistingPaths() throws Exception {
+		Path first = Files.writeString(tempDir.resolve("first.txt"), "first");
+		Path second = Files.createDirectory(tempDir.resolve("second"));
+
+		List<Path> paths = ArchiveClipboardService.existingTextPaths(
+				"\"" + first + "\"\n" + second + "\n" + tempDir.resolve("missing"));
+
+		assertEquals(List.of(first, second), paths);
+	}
+
+	@Test
+	void copyActionForwardsTheSdkAcceptCopyHandshake() {
+		var source = new ZipFilePanelPlugin();
+		var destination = new RecordingZipPlugin();
+		var payload = new HashMap<String, Object>();
+
+		source.act(destination, "filepanel.copy", List.of(), null, payload, null);
+
+		assertEquals("accept.copy", destination.actionType);
+	}
+
+	@Test
+	void f5MenuUsesTheSdkCopyAction() {
+		var plugin = new ZipFilePanelPlugin();
+
+		var copy = plugin.menuItems(null).stream()
+				.filter(item -> "F5".equals(item.getFunctionKey()))
+				.findFirst().orElseThrow();
+
+		assertEquals("filepanel.copy", copy.getEventType());
+	}
+
+	@Test
+	void acceptCopyWritesIntoAnOpenZipAndRefreshesItsPanel() throws Exception {
+		Path archive = tempDir.resolve("open.zip");
+		try (var ignored = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			// Create a valid empty ZIP.
+		}
+		Path source = Files.writeString(tempDir.resolve("incoming.txt"), "incoming");
+		var bus = new RecordingEventBus();
+		var context = new TestContext(bus);
+		var plugin = new ZipFilePanelPlugin();
+		plugin.preinit(context);
+		plugin.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+
+		plugin.act(null, "accept.copy", List.of(new ZipFileNuclrResource(context, source)), null,
+				new HashMap<>(), null);
+
+		assertEquals("incoming", Files.readString(plugin.getCurrentResource().getPath().resolve("incoming.txt")));
+		assertEquals("refresh.plugin.file.panel", bus.type);
+		assertEquals(plugin.uuid(), bus.event.get("plugin.uuid"));
+		plugin.unload();
+		try (var zip = FileSystems.newFileSystem(archive)) {
+			assertEquals("incoming", Files.readString(zip.getPath("/incoming.txt")));
+		}
+	}
+
+	@Test
+	void cancellingEncryptedZipPasswordPopsTheNewPanel() throws Exception {
+		Path content = Files.writeString(tempDir.resolve("secret.txt"), "secret");
+		Path archive = tempDir.resolve("secret.zip");
+		var parameters = new ZipParameters();
+		parameters.setEncryptFiles(true);
+		parameters.setEncryptionMethod(EncryptionMethod.ZIP_STANDARD);
+		try (var zip = new ZipFile(archive.toFile(), "password".toCharArray())) {
+			zip.addFile(content.toFile(), parameters);
+		}
+
+		var bus = new RecordingEventBus();
+		var plugin = new CancellingPasswordPlugin();
+		plugin.preinit(new TestContext(bus));
+		NuclrResource resource = new ZipFileNuclrResource(new TestContext(bus), archive);
+
+		assertNull(plugin.openResource(resource, new AtomicBoolean(false)));
+		assertEquals("plugin.unload", bus.type);
+		assertEquals(plugin.uuid(), bus.event.get("uuid"));
+		assertInstanceOf(NuclrResource.class, bus.event.get("selectionResource"));
+		assertFalse(bus.event.get("selectionResource") instanceof Path);
+	}
+
+	private static final class CancellingPasswordPlugin extends ZipFilePanelPlugin {
+		@Override
+		char[] promptPassword(String archiveName, boolean retry) {
+			return null;
+		}
+	}
+
+	private static final class RecordingZipPlugin extends ZipFilePanelPlugin {
+		private String actionType;
+
+		@Override
+		public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
+				NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+			this.actionType = actionType;
+		}
+	}
+
+	private record TestContext(NuclrEventBus eventBus) implements NuclrPluginContext {
+		@Override public NuclrEventBus getEventBus() { return eventBus; }
+		@Override public NuclrThemeScheme getTheme() { return null; }
+		@Override public NuclrSettings getSettings() { return null; }
+		@Override public Locale getLocale() { return Locale.US; }
+	}
+
+	private static final class RecordingEventBus implements NuclrEventBus {
+		private String type;
+		private Map<String, Object> event;
+
+		@Override
+		public void emit(Object source, String type, Map<String, Object> event, NuclrPluginCallback callback) {
+			this.type = type;
+			this.event = event;
+		}
+
+		@Override public void emit(Object source, String type, Map<String, Object> event) {
+			emit(source, type, event, null);
+		}
+		@Override public void emit(String type, Map<String, Object> event, NuclrPluginCallback callback) {
+			emit(null, type, event, callback);
+		}
+		@Override public void emit(String type, NuclrPluginCallback callback) { emit(null, type, Map.of(), callback); }
+		@Override public void emit(String type) { emit(null, type, Map.of(), null); }
+		@Override public void subscribe(NuclrEventListener listener) { }
+		@Override public void unsubscribe(NuclrEventListener listener) { }
+	}
+}

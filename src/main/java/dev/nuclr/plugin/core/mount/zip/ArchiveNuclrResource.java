@@ -125,7 +125,9 @@ final class ArchiveNuclrResource {
 		r.getMetadata().put("Name", r.getName());
 		r.getMetadata().put("Size", r.isFolder() ? "Folder" : FileUtils.byteCountToDisplaySize(r.getLength()));
 		r.getMetadata().put("Date", getDate(ctx.getLocale(), r.getLastModifiedDateTime()));
-		r.getMetadata().put("Time", getTime(ctx.getLocale(), r.getLastAccessDateTime()));
+		// Date and Time are the two halves of the same (modification) timestamp;
+		// access time would show the extraction moment for temp-extracted archives.
+		r.getMetadata().put("Time", getTime(ctx.getLocale(), r.getLastModifiedDateTime()));
 	}
 
 	/** Get time String in a localised format */

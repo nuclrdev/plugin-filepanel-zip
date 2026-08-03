@@ -105,6 +105,74 @@ final class ArchiveExtractor {
 		}
 	}
 
+	/**
+	 * True if any entry name uses a Windows-style backslash separator. Such
+	 * archives violate the ZIP spec (which mandates {@code '/'}); the NIO
+	 * {@code ZipFileSystem} then treats {@code '\'} as a literal filename
+	 * character, collapsing nested paths like {@code icons\i0.gif} into flat,
+	 * unbrowsable root entries. Detecting this lets the plugin fall back to
+	 * extraction, which rebuilds the real folder tree. Backslash is ASCII, so the
+	 * scan is charset-independent; returns false if the archive cannot be read.
+	 */
+	static boolean hasBackslashEntryNames(Path source) {
+		// Scan with ISO-8859-1: it decodes every byte, so the scan also works on
+		// CP866/windows-1251 archives (the DOS-era ZIPs most likely to use '\'),
+		// where the default UTF-8 decoding would fail. 0x5C never occurs inside a
+		// UTF-8 multi-byte sequence, so this cannot produce false positives either.
+		try (var zip = new java.util.zip.ZipFile(source.toFile(), StandardCharsets.ISO_8859_1)) {
+			final Enumeration<? extends java.util.zip.ZipEntry> entries = zip.entries();
+			while (entries.hasMoreElements()) {
+				if (entries.nextElement().getName().indexOf('\\') >= 0) {
+					return true;
+				}
+			}
+		} catch (Exception e) {
+			log.debug("Could not scan entry names for {}: {}", source, e.getMessage());
+		}
+		return false;
+	}
+
+	/**
+	 * Extract a ZIP whose entry names may use {@code '\'} (or mixed) separators,
+	 * rebuilding a proper nested folder tree. Entry names are normalised through
+	 * {@link #safeResolve}, which maps {@code '\'} to {@code '/'} and blocks
+	 * {@code ../} traversal.
+	 *
+	 * @param charset the entry-name charset, or {@code null} for UTF-8
+	 */
+	static void extractZipNormalizingSeparators(Path source, Path destination, Charset charset) throws IOException {
+
+		final Charset cs = charset != null ? charset : StandardCharsets.UTF_8;
+
+		try (var zip = new java.util.zip.ZipFile(source.toFile(), cs)) {
+
+			final Enumeration<? extends java.util.zip.ZipEntry> entries = zip.entries();
+			while (entries.hasMoreElements()) {
+
+				final java.util.zip.ZipEntry entry = entries.nextElement();
+				final var target = safeResolve(destination, entry.getName());
+
+				// Degenerate names ("", "/", "\") resolve to the destination itself.
+				if (target.equals(destination.normalize())) {
+					continue;
+				}
+
+				final String rawName = entry.getName();
+				if (entry.isDirectory() || rawName.endsWith("/") || rawName.endsWith("\\")) {
+					Files.createDirectories(target);
+					continue;
+				}
+
+				if (target.getParent() != null) {
+					Files.createDirectories(target.getParent());
+				}
+				try (InputStream in = zip.getInputStream(entry)) {
+					Files.copy(in, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+				}
+			}
+		}
+	}
+
 	// -------------------------------------------------------------------------
 	// RAR (junrar)
 	// -------------------------------------------------------------------------
@@ -163,7 +231,9 @@ final class ArchiveExtractor {
 				}
 
 				Files.createDirectories(target.getParent());
-				Files.copy(tar, target);
+				// REPLACE_EXISTING: a TAR may legitimately contain the same path
+				// twice (appended archives); the later entry wins.
+				Files.copy(tar, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
 			}
 		}
 	}
@@ -230,7 +300,9 @@ final class ArchiveExtractor {
 				score += scoreName(entries.nextElement().getName());
 			}
 
-		} catch (IOException e) {
+		} catch (Exception e) {
+			// Undecodable entry names surface as IllegalArgumentException from
+			// entries(), not only as IOException — either way the charset loses.
 			return Long.MIN_VALUE;
 		}
 

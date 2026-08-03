@@ -68,7 +68,9 @@ public final class ZipFileNuclrResource extends NuclrResource {
 		this.getMetadata().put("Name", this.getName());
 		this.getMetadata().put("Size", isFolder() ? "Folder" : FileUtils.byteCountToDisplaySize(this.getLength()));
 		this.getMetadata().put("Date", getDate(ctx.getLocale(), this.getLastModifiedDateTime()));
-		this.getMetadata().put("Time", getTime(ctx.getLocale(), this.getLastAccessDateTime()));
+		// Date and Time are the two halves of the same (modification) timestamp;
+		// access time would show the extraction moment for temp-extracted archives.
+		this.getMetadata().put("Time", getTime(ctx.getLocale(), this.getLastModifiedDateTime()));
 
 	}
 	
