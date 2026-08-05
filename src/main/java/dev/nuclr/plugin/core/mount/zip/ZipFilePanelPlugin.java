@@ -87,6 +87,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	/** Commander event emitted to unload this panel layer (see {@code Events}). */
 	private static final String EventPluginUnload = "plugin.unload";
+	/** Commander event asking for the panel of a given plugin uuid to re-read its listing. */
+	private static final String EventRefreshPanel = "refresh.plugin.file.panel";
 	private static final String ActionCopy = "filepanel.copy";
 	private static final String ActionAcceptCopy = "accept.copy";
 	private static final String ActionClipboardCopy = "clipboard.copy";
@@ -886,7 +888,15 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (ActionCopy.equals(actionType)) {
 			BaseNuclrPlugin destination = other == null || other.uuid().equals(uuid)
 					|| other.is(BaseNuclrPlugin.Type.QuickView) ? this : other;
-			destination.act(null, ActionAcceptCopy, selectedResources, focusedResource, data, callback);
+			try {
+				destination.act(null, ActionAcceptCopy, selectedResources, focusedResource, data, callback);
+			} finally {
+				// A receiving plugin normally refreshes its own panel, but its emit sits after the
+				// transfer: anything that escapes the copy (a failed item, an error from a listener
+				// it called on the way) skips it and leaves the destination listing stale. Ask for
+				// the refresh from here too, so it does not depend on the peer getting that far.
+				requestPanelRefresh(destination.uuid());
+			}
 			return;
 		}
 
@@ -931,7 +941,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 		try {
 			if (ArchiveCopyService.copyInto(destination, sources, callback)) {
-				context.getEventBus().emit("refresh.plugin.file.panel", Map.of("plugin.uuid", uuid), null);
+				requestPanelRefresh(uuid);
 			}
 		} catch (IOException | RuntimeException e) {
 			log.error("Failed to copy into archive {}: {}", archiveDisplayName, e.getMessage(), e);
@@ -940,6 +950,17 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			}
 			showError("Copy", e.getMessage());
 		}
+	}
+
+	/**
+	 * Ask the commander to re-read the panel backed by {@code pluginUuid}. Safe to call more than
+	 * once for the same panel: a second request supersedes the listing already in flight.
+	 */
+	private void requestPanelRefresh(String pluginUuid) {
+		if (context == null || context.getEventBus() == null || pluginUuid == null) {
+			return;
+		}
+		context.getEventBus().emit(EventRefreshPanel, Map.of("plugin.uuid", pluginUuid), null);
 	}
 
 	private void copyToClipboard(List<NuclrResource> selectedResources, NuclrResource focusedResource) {

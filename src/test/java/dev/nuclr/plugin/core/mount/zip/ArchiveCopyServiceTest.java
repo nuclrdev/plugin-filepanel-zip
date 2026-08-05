@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.datatransfer.DataFlavor;
@@ -145,6 +146,33 @@ class ArchiveCopyServiceTest {
 	}
 
 	@Test
+	void copyOutOfTheArchiveRefreshesTheReceivingPanel() {
+		var bus = new RecordingEventBus();
+		var source = new ZipFilePanelPlugin();
+		source.preinit(new TestContext(bus));
+		var destination = new RecordingZipPlugin();
+
+		source.act(destination, "filepanel.copy", List.of(), null, new HashMap<>(), null);
+
+		assertEquals("refresh.plugin.file.panel", bus.type);
+		assertEquals(destination.uuid(), bus.event.get("plugin.uuid"));
+	}
+
+	@Test
+	void theReceivingPanelIsRefreshedEvenWhenTheCopyBlowsUp() {
+		var bus = new RecordingEventBus();
+		var source = new ZipFilePanelPlugin();
+		source.preinit(new TestContext(bus));
+		var destination = new ThrowingZipPlugin();
+
+		assertThrows(IllegalStateException.class,
+				() -> source.act(destination, "filepanel.copy", List.of(), null, new HashMap<>(), null));
+
+		assertEquals("refresh.plugin.file.panel", bus.type);
+		assertEquals(destination.uuid(), bus.event.get("plugin.uuid"));
+	}
+
+	@Test
 	void f5MenuUsesTheSdkCopyAction() {
 		var plugin = new ZipFilePanelPlugin();
 
@@ -217,6 +245,15 @@ class ArchiveCopyServiceTest {
 		public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
 				NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
 			this.actionType = actionType;
+		}
+	}
+
+	/** Stands in for a receiving plugin whose transfer fails before it can refresh its own panel. */
+	private static final class ThrowingZipPlugin extends ZipFilePanelPlugin {
+		@Override
+		public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
+				NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+			throw new IllegalStateException("copy failed");
 		}
 	}
 
