@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -30,6 +31,7 @@ import dev.nuclr.platform.NuclrThemeScheme;
 import dev.nuclr.platform.events.NuclrEventBus;
 import dev.nuclr.platform.events.NuclrEventListener;
 import dev.nuclr.platform.plugin.BaseNuclrPlugin;
+import dev.nuclr.platform.plugin.NuclrMenuResource;
 import dev.nuclr.platform.plugin.NuclrPluginCallback;
 import dev.nuclr.platform.plugin.NuclrPluginContext;
 import dev.nuclr.platform.plugin.NuclrResource;
@@ -170,6 +172,40 @@ class ArchiveCopyServiceTest {
 
 		assertEquals("refresh.plugin.file.panel", bus.type);
 		assertEquals(destination.uuid(), bus.event.get("plugin.uuid"));
+	}
+
+	@Test
+	void sortsAreDeclaredWithTheEventTypeTheCommanderParses() {
+		var items = new ZipFilePanelPlugin().menuItems(null);
+
+		// The commander only recognises a sort by this event-type prefix; anything else is inert.
+		var sorts = items.stream()
+				.filter(item -> item.getEventType().startsWith("filepanel.sort:"))
+				.collect(Collectors.toMap(NuclrMenuResource::getFunctionKey, NuclrMenuResource::getEventType));
+
+		assertEquals(Map.of(
+				"Ctrl+F3", "filepanel.sort:name:Name",
+				"Ctrl+F4", "filepanel.sort:ext",
+				"Ctrl+F5", "filepanel.sort:modified:Date",
+				"Ctrl+F6", "filepanel.sort:size:Size",
+				"Ctrl+F7", "filepanel.sort:unsorted",
+				"Ctrl+F12", "filepanel.sort:dialog"), sorts);
+	}
+
+	@Test
+	void everySortColumnIsOneThePanelActuallyShows() {
+		var columns = ZipFilePanelPlugin.ColumnNames;
+
+		for (var item : new ZipFilePanelPlugin().menuItems(null)) {
+			if (!item.getEventType().startsWith("filepanel.sort:")) {
+				continue;
+			}
+			String[] parts = item.getEventType().substring("filepanel.sort:".length()).split(":", 2);
+			if (parts.length == 2) {
+				assertTrue(columns.contains(parts[1]),
+						"sort maps to column '" + parts[1] + "', which the panel does not render");
+			}
+		}
 	}
 
 	@Test

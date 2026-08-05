@@ -93,6 +93,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private static final String ActionAcceptCopy = "accept.copy";
 	private static final String ActionClipboardCopy = "clipboard.copy";
 	private static final String ActionClipboardPaste = "clipboard.paste";
+	/** Event-type prefix that marks a menu item as a sort command the commander can apply. */
+	private static final String SortEventPrefix = "filepanel.sort:";
 	private static final String ActionMakeFolder = "filepanel.makeFolder";
 	private static final String ActionDelete = "filepanel.delete";
 	private static final String ActionDeletePermanent = "filepanel.deletePermanent";
@@ -557,17 +559,28 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		items.add(menu("Folder History", "Alt+F12", "folderHistory"));
 	}
 
+	/**
+	 * Sorts this panel exposes, shown on the function-key bar under Ctrl. The commander owns the
+	 * comparators and reaches them only through the {@code "filepanel.sort:<criterion>[:<column>]"}
+	 * event type, so a sort declared any other way is inert. Sort labels name the column they mark
+	 * with the header arrow; Extension has no column of its own here, and created/accessed are left
+	 * out entirely -- an archive entry carries one timestamp, and for temp-extracted archives those
+	 * two report the moment of extraction rather than anything about the entry.
+	 */
 	private static void addCtrlMenuItems(List<NuclrMenuResource> items) {
 		items.add(menu("Hide Left", "Ctrl+F1", "hideLeft"));
 		items.add(menu("Hide Right", "Ctrl+F2", "hideRight"));
-		items.add(menu("Sort by name", "Ctrl+F3", "sortByName"));
-		items.add(menu("Sort by extension", "Ctrl+F4", "sortByExtension"));
-		items.add(menu("Sort by modified", "Ctrl+F5", "sortByModifiedDate"));
-		items.add(menu("Sort by size", "Ctrl+F6", "sortBySize"));
-		items.add(menu("Unsort", "Ctrl+F7", "unsort"));
-		items.add(menu("Sort by create", "Ctrl+F8", "sortByCreateDate"));
-		items.add(menu("Sort by access", "Ctrl+F9", "sortByAccessTime"));
-		items.add(menu("Sort menu", "Ctrl+F12", "sortMenu"));
+		items.add(sortByColumn("Name", "Ctrl+F3", "name"));
+		items.add(menu("Extension", "Ctrl+F4", SortEventPrefix + "ext"));
+		items.add(sortByColumn("Date", "Ctrl+F5", "modified"));
+		items.add(sortByColumn("Size", "Ctrl+F6", "size"));
+		items.add(menu("Unsort", "Ctrl+F7", SortEventPrefix + "unsorted"));
+		items.add(menu("Sort", "Ctrl+F12", SortEventPrefix + "dialog"));
+	}
+
+	/** A sort bound to one of this panel's table columns, so the header arrow lands on it. */
+	private static NuclrMenuResource sortByColumn(String columnName, String functionKey, String criterion) {
+		return menu(columnName, functionKey, SortEventPrefix + criterion + ":" + columnName);
 	}
 
 	private static void addShiftMenuItems(List<NuclrMenuResource> items) {
