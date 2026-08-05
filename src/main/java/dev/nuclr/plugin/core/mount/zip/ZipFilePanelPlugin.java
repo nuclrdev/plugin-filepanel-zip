@@ -126,9 +126,6 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	/** Temp files created when materialising nested archives, for cleanup. */
 	private final List<Path> materializedTempFiles = new CopyOnWriteArrayList<>();
 
-	/** Default-filesystem copies placed on the system clipboard. */
-	private final List<Path> clipboardTempDirs = new CopyOnWriteArrayList<>();
-
 	// =========================================================================
 	// Lifecycle
 	// =========================================================================
@@ -180,11 +177,6 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			}
 		}
 		materializedTempFiles.clear();
-
-		for (var temp : clipboardTempDirs) {
-			ArchiveClipboardService.deleteRecursively(temp);
-		}
-		clipboardTempDirs.clear();
 
 		log.info("Archive panel plugin unloaded");
 	}
@@ -888,7 +880,12 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 
 		if (ActionClipboardPaste.equals(actionType)) {
-			copyIntoArchive(ArchiveClipboardService.readPaths(), callback);
+			List<Path> paths = ArchiveClipboardService.readPaths();
+			if (paths.isEmpty()) {
+				showError("Clipboard Paste", "The clipboard does not contain any local files.");
+				return;
+			}
+			copyIntoArchive(paths, callback);
 		}
 	}
 
@@ -921,10 +918,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 		List<String> displayPaths = paths.stream().map(this::archiveDisplayPath).toList();
 		try {
-			Path temp = ArchiveClipboardService.copy(paths, displayPaths);
-			if (temp != null) {
-				clipboardTempDirs.add(temp);
-			}
+			ArchiveClipboardService.copy(paths, displayPaths);
 		} catch (IOException | RuntimeException e) {
 			log.error("Failed to copy archive entries to clipboard: {}", e.getMessage(), e);
 			showError("Clipboard Copy", e.getMessage());

@@ -6,7 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.Transferable;
+import java.awt.datatransfer.UnsupportedFlavorException;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,6 +81,56 @@ class ArchiveCopyServiceTest {
 				"\"" + first + "\"\n" + second + "\n" + tempDir.resolve("missing"));
 
 		assertEquals(List.of(first, second), paths);
+	}
+
+	@Test
+	void linuxUriListClipboardAcceptsEncodedFileUris() throws Exception {
+		Path first = Files.writeString(tempDir.resolve("first file.txt"), "first");
+		Path second = Files.createDirectory(tempDir.resolve("second folder"));
+		String uriList = "# copied files\r\n" + first.toUri().toASCIIString() + "\r\n"
+				+ second.toUri().toASCIIString() + "\r\nhttps://example.com/not-a-file";
+		DataFlavor flavor = new DataFlavor(
+				"text/uri-list;class=java.io.InputStream;charset=UTF-8", "URI list");
+		Transferable clipboard = new SingleFlavorTransferable(flavor, uriList);
+
+		assertEquals(List.of(first, second), ArchiveClipboardService.readPaths(clipboard));
+	}
+
+	@Test
+	void gnomeClipboardCopyPrefixIsIgnored() throws Exception {
+		Path file = Files.writeString(tempDir.resolve("gnome.txt"), "content");
+		DataFlavor flavor = new DataFlavor(
+				"x-special/gnome-copied-files;class=java.io.InputStream", "GNOME copied files");
+		Transferable clipboard = new SingleFlavorTransferable(flavor,
+				"copy\n" + file.toUri().toASCIIString());
+
+		assertEquals(List.of(file), ArchiveClipboardService.readPaths(clipboard));
+	}
+
+	@Test
+	void linuxUriListIsTriedWhenAdvertisedJavaFileListCannotBeRead() throws Exception {
+		Path file = Files.writeString(tempDir.resolve("fallback.txt"), "content");
+		DataFlavor uriFlavor = new DataFlavor(
+				"text/uri-list;class=java.io.InputStream;charset=UTF-8", "URI list");
+		Transferable clipboard = new Transferable() {
+			@Override public DataFlavor[] getTransferDataFlavors() {
+				return new DataFlavor[] { DataFlavor.javaFileListFlavor, uriFlavor };
+			}
+			@Override public boolean isDataFlavorSupported(DataFlavor flavor) {
+				return DataFlavor.javaFileListFlavor.equals(flavor) || uriFlavor.equals(flavor);
+			}
+			@Override public Object getTransferData(DataFlavor flavor) throws UnsupportedFlavorException {
+				if (DataFlavor.javaFileListFlavor.equals(flavor)) {
+					throw new UnsupportedFlavorException(flavor);
+				}
+				if (uriFlavor.equals(flavor)) {
+					return new ByteArrayInputStream(file.toUri().toASCIIString().getBytes(StandardCharsets.UTF_8));
+				}
+				throw new UnsupportedFlavorException(flavor);
+			}
+		};
+
+		assertEquals(List.of(file), ArchiveClipboardService.readPaths(clipboard));
 	}
 
 	@Test
@@ -162,6 +217,17 @@ class ArchiveCopyServiceTest {
 		public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
 				NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
 			this.actionType = actionType;
+		}
+	}
+
+	private record SingleFlavorTransferable(DataFlavor flavor, String text) implements Transferable {
+		@Override public DataFlavor[] getTransferDataFlavors() { return new DataFlavor[] { flavor }; }
+		@Override public boolean isDataFlavorSupported(DataFlavor candidate) { return flavor.equals(candidate); }
+		@Override public Object getTransferData(DataFlavor candidate) throws UnsupportedFlavorException {
+			if (!isDataFlavorSupported(candidate)) {
+				throw new UnsupportedFlavorException(candidate);
+			}
+			return new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8));
 		}
 	}
 
