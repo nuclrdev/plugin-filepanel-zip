@@ -30,16 +30,28 @@ final class ArchiveCopyService {
 	private ArchiveCopyService() {
 	}
 
-	static List<Path> selectedPaths(List<NuclrResource> selectedResources, NuclrResource focusedResource) {
+	/**
+	 * The entries an operation should act on: the marked ones, or the entry under the cursor when
+	 * nothing is marked. The {@code ..} parent row is never one of them.
+	 */
+	static List<NuclrResource> selectedEntries(List<NuclrResource> selectedResources, NuclrResource focusedResource) {
 		List<NuclrResource> resources = selectedResources != null && !selectedResources.isEmpty()
 				? selectedResources
 				: focusedResource != null ? List.of(focusedResource) : List.of();
 
-		var paths = new ArrayList<Path>();
+		var entries = new ArrayList<NuclrResource>();
 		for (var resource : resources) {
 			if (resource != null && resource.getPath() != null && !"..".equals(resource.getName())) {
-				paths.add(resource.getPath());
+				entries.add(resource);
 			}
+		}
+		return entries;
+	}
+
+	static List<Path> selectedPaths(List<NuclrResource> selectedResources, NuclrResource focusedResource) {
+		var paths = new ArrayList<Path>();
+		for (var resource : selectedEntries(selectedResources, focusedResource)) {
+			paths.add(resource.getPath());
 		}
 		return paths;
 	}

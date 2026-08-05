@@ -91,6 +91,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private static final String ActionAcceptCopy = "accept.copy";
 	private static final String ActionClipboardCopy = "clipboard.copy";
 	private static final String ActionClipboardPaste = "clipboard.paste";
+	private static final String ActionMakeFolder = "filepanel.makeFolder";
+	private static final String ActionDelete = "filepanel.delete";
+	private static final String ActionDeletePermanent = "filepanel.deletePermanent";
 
 	// -------------------------------------------------------------------------
 	// Runtime state â€” one instance backs one mounted/extracted archive
@@ -435,38 +438,21 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	@Override
 	public void handleMessage(Object source, String type, Map<String, Object> eventData, NuclrPluginCallback callback) {
-
-		if (("delete".equals(type) || "deletePermanent".equals(type)) && eventData != null) {
-			handleDelete(eventData, callback);
-			return;
-		}
-
-		if ("filepanel.makeFolder".equals(type) && eventData != null) {
-			if (!focused || currentFolder == null) {
-				return;
-			}
-			if (!isWritableArchive()) {
-				showError("Make Folder", "This archive view is read-only.");
-				return;
-			}
-			var createdPath = MakeNewFolderService.makeNewFolder(currentFolder, callback);
-			if (createdPath == null) {
-				return;
-			}
-			try {
-				eventData.put("createdResource", ArchiveNuclrResource.build(context, createdPath));
-			} catch (UnsupportedOperationException ignored) {
-				log.debug("Make-folder event payload is immutable; created resource will not be selected.");
-			}
-		}
+		// Panel commands reach a file-panel plugin through act(), not the bus; see act(...).
 	}
 
-	@SuppressWarnings("unchecked")
-	private void handleDelete(Map<String, Object> eventData, NuclrPluginCallback callback) {
+	@Override
+	public boolean isMessageSupported(String type) {
+		return false;
+	}
 
-		// Delivered directly to this (focused) panel's plugin by the commander, so no focus guard
-		// is needed â€” the broadcast that used to require it no longer happens.
-		if (!(eventData.get("sources") instanceof List<?> list) || list.isEmpty()) {
+	/**
+	 * Delete the selected entries from the archive. Removal from an archive is always permanent
+	 * (there is no recycle bin for an archive entry), so F8 and Shift+F8 both land here.
+	 */
+	private void handleDelete(List<NuclrResource> sources, Map<String, Object> data, NuclrPluginCallback callback) {
+
+		if (sources.isEmpty()) {
 			return;
 		}
 
@@ -478,19 +464,54 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			return;
 		}
 
-		List<NuclrResource> sources = (List<NuclrResource>) list;
-
 		// Plugin-rendered confirmation listing the full paths to be deleted.
 		if (!DeleteDialogs.confirmDelete(sources)) {
 			return;
 		}
 
 		DeleteService.delete(sources, callback, (item, e) -> DeleteDialogs.error(item.getName(), e));
+
+		// The panel still shows the removed entries, and a partly-completed run (Skip on error,
+		// or cancellation) leaves some of them behind, so re-read the listing rather than guess.
+		requestRefresh(data, null);
 	}
 
-	@Override
-	public boolean isMessageSupported(String type) {
-		return "filepanel.makeFolder".equals(type) || "delete".equals(type) || "deletePermanent".equals(type);
+	private void handleMakeFolder(Map<String, Object> data, NuclrPluginCallback callback) {
+
+		if (currentFolder == null) {
+			return;
+		}
+
+		if (!isWritableArchive()) {
+			showError("Make Folder", "This archive view is read-only.");
+			return;
+		}
+
+		var createdPath = MakeNewFolderService.makeNewFolder(currentFolder, callback);
+		if (createdPath == null) {
+			return;
+		}
+
+		requestRefresh(data, ArchiveNuclrResource.build(context, createdPath));
+	}
+
+	/**
+	 * Ask the commander to re-read this panel because the archive changed, optionally leaving the
+	 * cursor on {@code selectAfterRefresh}. The payload map belongs to the host, so tolerate one
+	 * that rejects writes instead of failing an operation that already succeeded.
+	 */
+	private static void requestRefresh(Map<String, Object> data, NuclrResource selectAfterRefresh) {
+		if (data == null) {
+			return;
+		}
+		try {
+			data.put("result.refresh", true);
+			if (selectAfterRefresh != null) {
+				data.put("result.refresh.selected.resource", selectAfterRefresh);
+			}
+		} catch (UnsupportedOperationException ignored) {
+			log.debug("Action payload is immutable; the panel will not refresh automatically.");
+		}
 	}
 
 	@Override
@@ -516,8 +537,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		items.add(menu("Edit", "F4", "edit"));
 		items.add(menu("Copy", "F5", ActionCopy));
 		items.add(menu(isDirectory ? "Move" : "Rename/Move", "F6", "move"));
-		items.add(menu("Make Folder", "F7", "filepanel.makeFolder"));
-		items.add(menu("Delete", "F8", "delete"));
+		items.add(menu("Make Folder", "F7", ActionMakeFolder));
+		items.add(menu("Delete", "F8", ActionDelete));
 		items.add(menu("Quit", "F10", "quit"));
 		items.add(menu("Plugins", "F11", "plugins"));
 		items.add(menu("Screen", "F12", "screen"));
@@ -548,7 +569,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	private static void addShiftMenuItems(List<NuclrMenuResource> items) {
-		items.add(menu("Delete Permanently", "Shift+F8", "deletePermanent"));
+		items.add(menu("Delete Permanently", "Shift+F8", ActionDeletePermanent));
 	}
 
 	private static NuclrMenuResource menu(String name, String functionKey, String eventType) {
@@ -871,6 +892,16 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		if (ActionAcceptCopy.equals(actionType)) {
 			copyIntoArchive(ArchiveCopyService.selectedPaths(selectedResources, focusedResource), callback);
+			return;
+		}
+
+		if (ActionDelete.equals(actionType) || ActionDeletePermanent.equals(actionType)) {
+			handleDelete(ArchiveCopyService.selectedEntries(selectedResources, focusedResource), data, callback);
+			return;
+		}
+
+		if (ActionMakeFolder.equals(actionType)) {
+			handleMakeFolder(data, callback);
 			return;
 		}
 
