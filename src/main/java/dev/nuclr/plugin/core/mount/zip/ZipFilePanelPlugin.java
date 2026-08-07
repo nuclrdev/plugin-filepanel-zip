@@ -89,6 +89,10 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private static final String EventPluginUnload = "plugin.unload";
 	/** Commander event asking for the panel of a given plugin uuid to re-read its listing. */
 	private static final String EventRefreshPanel = "refresh.plugin.file.panel";
+	private static final String EventMainPanelView = "mainpanel.view";
+	private static final String EventMainPanelEdit = "mainpanel.edit";
+	private static final String ActionView = "filepanel.view";
+	private static final String ActionEdit = "filepanel.edit";
 	private static final String ActionCopy = "filepanel.copy";
 	private static final String ActionAcceptCopy = "accept.copy";
 	private static final String ActionClipboardCopy = "clipboard.copy";
@@ -537,8 +541,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	private static void addDefaultMenuItems(List<NuclrMenuResource> items, boolean isDirectory) {
-		items.add(menu("View", "F3", "view"));
-		items.add(menu("Edit", "F4", "edit"));
+		items.add(menu("View", "F3", ActionView));
+		items.add(menu("Edit", "F4", ActionEdit));
 		items.add(menu("Copy", "F5", ActionCopy));
 		items.add(menu(isDirectory ? "Move" : "Rename/Move", "F6", "move"));
 		items.add(menu("Make Folder", "F7", ActionMakeFolder));
@@ -898,6 +902,16 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	@Override
 	public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
 			NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+		if (ActionView.equals(actionType)) {
+			openInMainPanel(focusedResource, EventMainPanelView, false);
+			return;
+		}
+
+		if (ActionEdit.equals(actionType)) {
+			openInMainPanel(focusedResource, EventMainPanelEdit, true);
+			return;
+		}
+
 		if (ActionCopy.equals(actionType)) {
 			BaseNuclrPlugin destination = other == null || other.uuid().equals(uuid)
 					|| other.is(BaseNuclrPlugin.Type.QuickView) ? this : other;
@@ -940,6 +954,19 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 				return;
 			}
 			copyIntoArchive(paths, callback);
+		}
+	}
+
+	private void openInMainPanel(NuclrResource resource, String eventType, boolean requiresWritableArchive) {
+		if (resource == null || resource.isFolder() || resource.getPath() == null) {
+			return;
+		}
+		if (requiresWritableArchive && !isWritableArchive()) {
+			showError("Edit", "This archive view is read-only.");
+			return;
+		}
+		if (context != null && context.getEventBus() != null) {
+			context.getEventBus().emit(eventType, Map.of("resource", resource), null);
 		}
 	}
 

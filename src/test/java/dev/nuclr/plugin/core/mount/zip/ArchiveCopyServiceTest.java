@@ -220,6 +220,54 @@ class ArchiveCopyServiceTest {
 	}
 
 	@Test
+	void viewAndEditMenusUseTheSdkActionTypes() {
+		var actions = new ZipFilePanelPlugin().menuItems(null).stream()
+				.filter(item -> "F3".equals(item.getFunctionKey()) || "F4".equals(item.getFunctionKey()))
+				.collect(Collectors.toMap(NuclrMenuResource::getFunctionKey, NuclrMenuResource::getEventType));
+
+		assertEquals(Map.of("F3", "filepanel.view", "F4", "filepanel.edit"), actions);
+	}
+
+	@Test
+	void viewActionRequestsTheMainPanelViewer() throws Exception {
+		Path file = Files.writeString(tempDir.resolve("view.txt"), "view");
+		var bus = new RecordingEventBus();
+		var context = new TestContext(bus);
+		var plugin = new ZipFilePanelPlugin();
+		plugin.preinit(context);
+		NuclrResource resource = new ZipFileNuclrResource(context, file);
+
+		plugin.act(null, "filepanel.view", List.of(), resource, new HashMap<>(), null);
+
+		assertEquals("mainpanel.view", bus.type);
+		assertEquals(resource, bus.event.get("resource"));
+	}
+
+	@Test
+	void editActionRequestsTheMainPanelEditorForAWritableArchive() throws Exception {
+		Path archive = tempDir.resolve("editable.zip");
+		try (var zip = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			Files.writeString(zip.getPath("/edit.txt"), "edit");
+		}
+		var bus = new RecordingEventBus();
+		var context = new TestContext(bus);
+		var plugin = new ZipFilePanelPlugin();
+		plugin.preinit(context);
+		try {
+			plugin.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+			NuclrResource resource = ArchiveNuclrResource.build(context,
+					plugin.getCurrentResource().getPath().resolve("edit.txt"));
+
+			plugin.act(null, "filepanel.edit", List.of(), resource, new HashMap<>(), null);
+
+			assertEquals("mainpanel.edit", bus.type);
+			assertEquals(resource, bus.event.get("resource"));
+		} finally {
+			plugin.unload();
+		}
+	}
+
+	@Test
 	void acceptCopyWritesIntoAnOpenZipAndRefreshesItsPanel() throws Exception {
 		Path archive = tempDir.resolve("open.zip");
 		try (var ignored = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
