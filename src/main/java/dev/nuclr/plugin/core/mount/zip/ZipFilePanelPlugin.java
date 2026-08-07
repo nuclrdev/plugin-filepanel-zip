@@ -95,6 +95,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private static final String ActionEdit = "filepanel.edit";
 	private static final String ActionCopy = "filepanel.copy";
 	private static final String ActionAcceptCopy = "accept.copy";
+	private static final String ActionMove = "filepanel.move";
+	private static final String ActionAcceptMove = "accept.move";
 	private static final String ActionClipboardCopy = "clipboard.copy";
 	private static final String ActionClipboardPaste = "clipboard.paste";
 	/** Event-type prefix that marks a menu item as a sort command the commander can apply. */
@@ -544,7 +546,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		items.add(menu("View", "F3", ActionView));
 		items.add(menu("Edit", "F4", ActionEdit));
 		items.add(menu("Copy", "F5", ActionCopy));
-		items.add(menu(isDirectory ? "Move" : "Rename/Move", "F6", "move"));
+		items.add(menu(isDirectory ? "Move" : "Rename/Move", "F6", ActionMove));
 		items.add(menu("Make Folder", "F7", ActionMakeFolder));
 		items.add(menu("Delete", "F8", ActionDelete));
 		items.add(menu("Quit", "F10", "quit"));
@@ -932,6 +934,16 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			return;
 		}
 
+		if (ActionMove.equals(actionType)) {
+			moveFromArchive(other, selectedResources, focusedResource, data, callback);
+			return;
+		}
+
+		if (ActionAcceptMove.equals(actionType)) {
+			moveIntoArchive(ArchiveCopyService.selectedPaths(selectedResources, focusedResource), callback);
+			return;
+		}
+
 		if (ActionDelete.equals(actionType) || ActionDeletePermanent.equals(actionType)) {
 			handleDelete(ArchiveCopyService.selectedEntries(selectedResources, focusedResource), data, callback);
 			return;
@@ -954,6 +966,63 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 				return;
 			}
 			copyIntoArchive(paths, callback);
+		}
+	}
+
+	private void moveFromArchive(BaseNuclrPlugin destination, List<NuclrResource> selectedResources,
+			NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+		if (!isWritableArchive()) {
+			showError("Move", "This archive view is read-only.");
+			return;
+		}
+
+		List<NuclrResource> sources = ArchiveCopyService.selectedEntries(selectedResources, focusedResource);
+		if (sources.isEmpty()) {
+			return;
+		}
+
+		if (destination == null || destination.uuid().equals(uuid)
+				|| destination.is(BaseNuclrPlugin.Type.QuickView)) {
+			if (sources.size() != 1) {
+				showError("Rename/Move", "Select one archive entry to rename.");
+				return;
+			}
+			Path renamed = ArchiveMoveService.renameInPlace(sources.get(0), callback);
+			if (renamed != null) {
+				requestRefresh(data, ArchiveNuclrResource.build(context, renamed));
+			}
+			return;
+		}
+
+		try {
+			destination.act(null, ActionAcceptMove, selectedResources, focusedResource, data, callback);
+		} finally {
+			// A move changes both panes. The receiver normally refreshes itself; these
+			// requests also cover partial failures before its own refresh is reached.
+			requestRefresh(data, null);
+			requestPanelRefresh(destination.uuid());
+		}
+	}
+
+	private void moveIntoArchive(List<Path> sources, NuclrPluginCallback callback) {
+		if (!isWritableArchive()) {
+			showError("Move", "This archive view is read-only.");
+			return;
+		}
+		Path destination = currentFolder != null ? currentFolder.getPath() : null;
+		if (sources == null || sources.isEmpty()) {
+			return;
+		}
+		try {
+			if (ArchiveMoveService.moveInto(destination, sources, callback)) {
+				requestPanelRefresh(uuid);
+			}
+		} catch (IOException | RuntimeException e) {
+			log.error("Failed to move into archive {}: {}", archiveDisplayName, e.getMessage(), e);
+			if (callback != null) {
+				callback.onError("Could not move into archive", e instanceof Exception ex ? ex : new IOException(e));
+			}
+			showError("Move", e.getMessage());
 		}
 	}
 

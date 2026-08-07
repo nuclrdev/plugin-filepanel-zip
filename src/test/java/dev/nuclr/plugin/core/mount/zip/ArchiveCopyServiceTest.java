@@ -220,6 +220,15 @@ class ArchiveCopyServiceTest {
 	}
 
 	@Test
+	void f6MenuUsesTheSdkMoveAction() {
+		var move = new ZipFilePanelPlugin().menuItems(null).stream()
+				.filter(item -> "F6".equals(item.getFunctionKey()))
+				.findFirst().orElseThrow();
+
+		assertEquals("filepanel.move", move.getEventType());
+	}
+
+	@Test
 	void viewAndEditMenusUseTheSdkActionTypes() {
 		var actions = new ZipFilePanelPlugin().menuItems(null).stream()
 				.filter(item -> "F3".equals(item.getFunctionKey()) || "F4".equals(item.getFunctionKey()))
@@ -265,6 +274,85 @@ class ArchiveCopyServiceTest {
 		} finally {
 			plugin.unload();
 		}
+	}
+
+	@Test
+	void moveActionForwardsTheSdkAcceptMoveHandshake() throws Exception {
+		Path archive = tempDir.resolve("move-source.zip");
+		try (var zip = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			Files.writeString(zip.getPath("/move.txt"), "move");
+		}
+		var source = new ZipFilePanelPlugin();
+		var bus = new RecordingEventBus();
+		var context = new TestContext(bus);
+		source.preinit(context);
+		var destination = new RecordingZipPlugin();
+		try {
+			source.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+			NuclrResource resource = ArchiveNuclrResource.build(context,
+					source.getCurrentResource().getPath().resolve("move.txt"));
+
+			source.act(destination, "filepanel.move", List.of(resource), resource, new HashMap<>(), null);
+
+			assertEquals("accept.move", destination.actionType);
+		} finally {
+			source.unload();
+		}
+	}
+
+	@Test
+	void acceptMoveWritesIntoAnOpenZipAndRemovesTheSource() throws Exception {
+		Path archive = tempDir.resolve("move-target.zip");
+		try (var ignored = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			// Create a valid empty ZIP.
+		}
+		Path sourceFolder = Files.createDirectories(tempDir.resolve("incoming/nested"));
+		Files.writeString(sourceFolder.resolve("incoming.txt"), "incoming");
+		Path source = sourceFolder.getParent();
+		var bus = new RecordingEventBus();
+		var context = new TestContext(bus);
+		var plugin = new ZipFilePanelPlugin();
+		plugin.preinit(context);
+		try {
+			plugin.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+
+			plugin.act(null, "accept.move", List.of(new ZipFileNuclrResource(context, source)), null,
+					new HashMap<>(), null);
+
+			assertFalse(Files.exists(source));
+			assertEquals("incoming", Files.readString(
+					plugin.getCurrentResource().getPath().resolve("incoming/nested/incoming.txt")));
+			assertEquals("refresh.plugin.file.panel", bus.type);
+			assertEquals(plugin.uuid(), bus.event.get("plugin.uuid"));
+		} finally {
+			plugin.unload();
+		}
+	}
+
+	@Test
+	void renamesEntriesInsideAZipFilesystem() throws Exception {
+		Path archive = tempDir.resolve("rename.zip");
+		try (var zip = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			Path source = Files.writeString(zip.getPath("/before.txt"), "content");
+
+			Path renamed = ArchiveMoveService.rename(source, "after.txt", null);
+
+			assertFalse(Files.exists(source));
+			assertEquals("content", Files.readString(renamed));
+		}
+	}
+
+	@Test
+	void failedMoveCopyLeavesTheSourceUntouched() throws Exception {
+		Path source = Files.createDirectories(tempDir.resolve("source/nested"));
+		Path sourceFile = Files.writeString(source.resolve("file.txt"), "content");
+		Path destination = Files.createDirectory(tempDir.resolve("destination"));
+		Files.writeString(destination.resolve("nested"), "blocks the source folder");
+
+		assertThrows(IOException.class,
+				() -> ArchiveMoveService.moveInto(destination, List.of(source), null));
+
+		assertEquals("content", Files.readString(sourceFile));
 	}
 
 	@Test
