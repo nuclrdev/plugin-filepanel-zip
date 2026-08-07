@@ -75,6 +75,11 @@ final class ArchiveExtractor {
 	 * @throws WrongPasswordException if the supplied password is rejected
 	 */
 	static void extractZip(Path source, Path destination, char[] password, Charset charset) throws IOException {
+		extractZip(source, destination, password, charset, ArchiveExtractionBudget.forArchive(source, true));
+	}
+
+	static void extractZip(Path source, Path destination, char[] password, Charset charset,
+			ArchiveExtractionBudget budget) throws IOException {
 
 		try (var zipFile = new net.lingala.zip4j.ZipFile(source.toFile())) {
 
@@ -85,7 +90,30 @@ final class ArchiveExtractor {
 				zipFile.setPassword(password);
 			}
 
-			zipFile.extractAll(destination.toString());
+			for (var header : zipFile.getFileHeaders()) {
+
+				final String entryName = header.getFileName();
+				budget.beginEntry(entryName, header.isDirectory() ? 0 : header.getUncompressedSize());
+				final var target = safeResolve(destination, entryName);
+
+				if (target.equals(destination.normalize())) {
+					continue;
+				}
+				if (header.isDirectory()) {
+					Files.createDirectories(target);
+					net.lingala.zip4j.util.UnzipUtil.applyFileAttributes(header, target.toFile());
+					continue;
+				}
+
+				if (target.getParent() != null) {
+					Files.createDirectories(target.getParent());
+				}
+				try (InputStream in = zipFile.getInputStream(header);
+						OutputStream out = budget.limit(Files.newOutputStream(target))) {
+					in.transferTo(out);
+				}
+				net.lingala.zip4j.util.UnzipUtil.applyFileAttributes(header, target.toFile());
+			}
 
 		} catch (ZipException e) {
 			if (e.getType() == ZipException.Type.WRONG_PASSWORD) {
@@ -141,6 +169,12 @@ final class ArchiveExtractor {
 	 * @param charset the entry-name charset, or {@code null} for UTF-8
 	 */
 	static void extractZipNormalizingSeparators(Path source, Path destination, Charset charset) throws IOException {
+		extractZipNormalizingSeparators(source, destination, charset,
+				ArchiveExtractionBudget.forArchive(source, true));
+	}
+
+	static void extractZipNormalizingSeparators(Path source, Path destination, Charset charset,
+			ArchiveExtractionBudget budget) throws IOException {
 
 		final Charset cs = charset != null ? charset : StandardCharsets.UTF_8;
 
@@ -150,6 +184,7 @@ final class ArchiveExtractor {
 			while (entries.hasMoreElements()) {
 
 				final java.util.zip.ZipEntry entry = entries.nextElement();
+				budget.beginEntry(entry.getName(), entry.isDirectory() ? 0 : entry.getSize());
 				final var target = safeResolve(destination, entry.getName());
 
 				// Degenerate names ("", "/", "\") resolve to the destination itself.
@@ -166,8 +201,9 @@ final class ArchiveExtractor {
 				if (target.getParent() != null) {
 					Files.createDirectories(target.getParent());
 				}
-				try (InputStream in = zip.getInputStream(entry)) {
-					Files.copy(in, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+				try (InputStream in = zip.getInputStream(entry);
+						OutputStream out = budget.limit(Files.newOutputStream(target))) {
+					in.transferTo(out);
 				}
 			}
 		}
@@ -178,6 +214,10 @@ final class ArchiveExtractor {
 	// -------------------------------------------------------------------------
 
 	static void extractRar(Path source, Path destination) throws IOException {
+		extractRar(source, destination, ArchiveExtractionBudget.forArchive(source, true));
+	}
+
+	static void extractRar(Path source, Path destination, ArchiveExtractionBudget budget) throws IOException {
 
 		try (var archive = new Archive(source.toFile())) {
 
@@ -185,6 +225,7 @@ final class ArchiveExtractor {
 			while ((header = archive.nextFileHeader()) != null) {
 
 				final var entryName = header.getFileName();
+				budget.beginEntry(entryName, header.isDirectory() ? 0 : header.getFullUnpackSize());
 				final var target = safeResolve(destination, entryName);
 
 				if (header.isDirectory()) {
@@ -193,7 +234,7 @@ final class ArchiveExtractor {
 				}
 
 				Files.createDirectories(target.getParent());
-				try (OutputStream os = Files.newOutputStream(target)) {
+				try (OutputStream os = budget.limit(Files.newOutputStream(target))) {
 					archive.extractFile(header, os);
 				}
 			}
@@ -201,6 +242,10 @@ final class ArchiveExtractor {
 		} catch (IOException e) {
 			throw e;
 		} catch (Exception e) {
+			final var limit = extractionLimitCause(e);
+			if (limit != null) {
+				throw limit;
+			}
 			throw new IOException("Failed to extract RAR: " + source.getFileName(), e);
 		}
 	}
@@ -210,6 +255,11 @@ final class ArchiveExtractor {
 	// -------------------------------------------------------------------------
 
 	static void extractTar(Path source, Path destination, boolean gzipped) throws IOException {
+		extractTar(source, destination, gzipped, ArchiveExtractionBudget.forArchive(source, gzipped));
+	}
+
+	static void extractTar(Path source, Path destination, boolean gzipped, ArchiveExtractionBudget budget)
+			throws IOException {
 
 		try (InputStream fileIn = Files.newInputStream(source);
 				InputStream in = gzipped ? new GzipCompressorInputStream(fileIn) : fileIn;
@@ -217,6 +267,7 @@ final class ArchiveExtractor {
 
 			TarArchiveEntry entry;
 			while ((entry = tar.getNextEntry()) != null) {
+				budget.beginEntry(entry.getName(), entry.isDirectory() ? 0 : entry.getSize());
 
 				if (!tar.canReadEntryData(entry)) {
 					log.warn("Skipping unreadable TAR entry: {}", entry.getName());
@@ -233,22 +284,41 @@ final class ArchiveExtractor {
 				Files.createDirectories(target.getParent());
 				// REPLACE_EXISTING: a TAR may legitimately contain the same path
 				// twice (appended archives); the later entry wins.
-				Files.copy(tar, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+				try (OutputStream out = budget.limit(Files.newOutputStream(target))) {
+					tar.transferTo(out);
+				}
 			}
 		}
 	}
 
 	/** Extract a single-file GZIP stream (e.g. {@code foo.txt.gz}). */
 	static void extractGzip(Path source, Path destination) throws IOException {
+		extractGzip(source, destination, ArchiveExtractionBudget.forArchive(source, true));
+	}
+
+	static void extractGzip(Path source, Path destination, ArchiveExtractionBudget budget) throws IOException {
 
 		final var outputName = strippedGzipName(source);
 		final var target = safeResolve(destination, outputName);
 		Files.createDirectories(target.getParent());
+		budget.beginEntry(outputName, -1);
 
 		try (InputStream fileIn = Files.newInputStream(source);
-				GzipCompressorInputStream gz = new GzipCompressorInputStream(fileIn)) {
-			Files.copy(gz, target);
+				GzipCompressorInputStream gz = new GzipCompressorInputStream(fileIn);
+				OutputStream out = budget.limit(Files.newOutputStream(target))) {
+			gz.transferTo(out);
 		}
+	}
+
+	private static ArchiveExtractionBudget.LimitExceededException extractionLimitCause(Throwable error) {
+		Throwable cause = error;
+		while (cause != null) {
+			if (cause instanceof ArchiveExtractionBudget.LimitExceededException limit) {
+				return limit;
+			}
+			cause = cause.getCause();
+		}
+		return null;
 	}
 
 	private static String strippedGzipName(Path source) {
