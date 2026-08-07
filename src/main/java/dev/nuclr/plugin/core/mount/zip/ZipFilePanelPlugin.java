@@ -133,6 +133,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	/** The temp directory an archive was extracted into, or {@code null}. */
 	private Path extractedTempDir;
 
+	/** True when this archive file itself belongs to a read-only parent archive view. */
+	private boolean readOnlySource;
+
 	/** Set once the root parent entry requests this panel to close. */
 	private boolean closing;
 
@@ -230,6 +233,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 			// Entering an archive file (top-level or a materialised nested archive).
 			if (!Files.isDirectory(target) && ArchiveType.isArchiveFile(target)) {
+				this.readOnlySource = resourceToOpen.getMetadata(ArchiveNuclrResource.KeyReadOnlySource, Boolean.FALSE);
 				return openArchive(target);
 			}
 
@@ -413,8 +417,15 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 
 		final var children = new ArrayList<NuclrResource>();
+		final boolean readOnlyEntries = !isWritableArchive();
 		try (var stream = Files.list(dir)) {
-			stream.forEach(p -> children.add(ArchiveNuclrResource.build(context, p)));
+			stream.forEach(path -> {
+				var child = ArchiveNuclrResource.build(context, path);
+				if (readOnlyEntries) {
+					child.getMetadata().put(ArchiveNuclrResource.KeyReadOnlySource, Boolean.TRUE);
+				}
+				children.add(child);
+			});
 		} catch (IOException e) {
 			log.error("Failed to list archive directory {}: {}", dir, e.getMessage(), e);
 		}
@@ -597,9 +608,10 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		return new NuclrMenuResource(name, functionKey, eventType);
 	}
 
-	private boolean isWritableArchive() {
+	boolean isWritableArchive() {
 		return mountedFileSystem != null
 				&& extractedTempDir == null
+				&& !readOnlySource
 				&& archiveFile != null
 				&& archiveFile.getFileSystem() == FileSystems.getDefault();
 	}

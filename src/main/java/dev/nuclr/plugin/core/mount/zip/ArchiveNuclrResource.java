@@ -52,6 +52,9 @@ final class ArchiveNuclrResource {
 	 */
 	public static final String KeyCloseArchive = "archive.close";
 
+	/** Marks an entry whose bytes live only in a read-only parent archive view. */
+	public static final String KeyReadOnlySource = "archive.readOnlySource";
+
 	private ArchiveNuclrResource() {
 	}
 

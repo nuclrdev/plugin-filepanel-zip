@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -401,6 +403,46 @@ class ArchiveCopyServiceTest {
 		assertEquals(plugin.uuid(), bus.event.get("uuid"));
 		assertInstanceOf(NuclrResource.class, bus.event.get("selectionResource"));
 		assertFalse(bus.event.get("selectionResource") instanceof Path);
+	}
+
+	@Test
+	void zipNestedInsideAnExtractedArchiveRemainsReadOnly() throws Exception {
+		Path nestedZip = tempDir.resolve("nested.zip");
+		try (var zip = FileSystems.newFileSystem(nestedZip, Map.of("create", "true"))) {
+			Files.writeString(zip.getPath("/inside.txt"), "inside");
+		}
+
+		Path parentTar = tempDir.resolve("parent.tar");
+		try (var tar = new TarArchiveOutputStream(Files.newOutputStream(parentTar))) {
+			var entry = new TarArchiveEntry("nested.zip");
+			entry.setSize(Files.size(nestedZip));
+			tar.putArchiveEntry(entry);
+			Files.copy(nestedZip, tar);
+			tar.closeArchiveEntry();
+		}
+
+		var context = new TestContext(new RecordingEventBus());
+		var parent = new ZipFilePanelPlugin();
+		var child = new ZipFilePanelPlugin();
+		parent.preinit(context);
+		child.preinit(context);
+		try {
+			var parentData = parent.openResource(new ZipFileNuclrResource(context, parentTar),
+					new AtomicBoolean(false));
+			NuclrResource nestedResource = parentData.getEntries().stream()
+					.filter(resource -> "nested.zip".equals(resource.getName()))
+					.findFirst().orElseThrow();
+
+			assertTrue(nestedResource.getMetadata(ArchiveNuclrResource.KeyReadOnlySource, Boolean.FALSE));
+			assertTrue(nestedResource.getPath().getFileSystem() == FileSystems.getDefault());
+
+			child.openResource(nestedResource, new AtomicBoolean(false));
+
+			assertFalse(child.isWritableArchive());
+		} finally {
+			child.unload();
+			parent.unload();
+		}
 	}
 
 	private static final class CancellingPasswordPlugin extends ZipFilePanelPlugin {
