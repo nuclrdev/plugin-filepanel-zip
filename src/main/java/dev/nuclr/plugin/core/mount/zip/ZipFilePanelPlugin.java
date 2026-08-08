@@ -48,6 +48,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 
 import javax.swing.JLabel;
+import javax.swing.JDialog;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPasswordField;
@@ -1014,6 +1015,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	char[] promptPassword(String archiveName, boolean retry) {
 
 		final char[][] result = new char[1][];
+		var visibleDialog = new AtomicReference<JDialog>();
 
 		final Runnable prompt = () -> {
 			final var passwordField = new JPasswordField(20);
@@ -1022,35 +1024,45 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			panel.add(new JLabel(message), java.awt.BorderLayout.NORTH);
 			panel.add(passwordField, java.awt.BorderLayout.CENTER);
 
-			final int choice = JOptionPane.showConfirmDialog(null, panel, "Encrypted Archive",
-					JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
-
-			if (choice == JOptionPane.OK_OPTION) {
-				result[0] = passwordField.getPassword();
+			var pane = new JOptionPane(panel, JOptionPane.QUESTION_MESSAGE, JOptionPane.OK_CANCEL_OPTION);
+			JDialog dialog = pane.createDialog(null, "Encrypted Archive");
+			visibleDialog.set(dialog);
+			try {
+				dialog.setVisible(true);
+				if (Integer.valueOf(JOptionPane.OK_OPTION).equals(pane.getValue())) {
+					result[0] = passwordField.getPassword();
+				}
+			} finally {
+				visibleDialog.compareAndSet(dialog, null);
+				dialog.dispose();
 			}
 		};
 
-		runOnEdtAndWait(prompt);
+		boolean completed = SwingDialogRunner.runAndWait("archive password dialog", prompt,
+				() -> dispose(visibleDialog));
 
-		return result[0] != null && result[0].length > 0 ? result[0] : null;
+		return completed && result[0] != null && result[0].length > 0 ? result[0] : null;
 	}
 
 	private void showError(String title, String message) {
-		runOnEdtAndWait(() -> JOptionPane.showMessageDialog(null, message, title, JOptionPane.ERROR_MESSAGE));
+		var visibleDialog = new AtomicReference<JDialog>();
+		SwingDialogRunner.runAndWait("archive error dialog", () -> {
+			var pane = new JOptionPane(message, JOptionPane.ERROR_MESSAGE, JOptionPane.DEFAULT_OPTION);
+			JDialog dialog = pane.createDialog(null, title);
+			visibleDialog.set(dialog);
+			try {
+				dialog.setVisible(true);
+			} finally {
+				visibleDialog.compareAndSet(dialog, null);
+				dialog.dispose();
+			}
+		}, () -> dispose(visibleDialog));
 	}
 
-	private static void runOnEdtAndWait(Runnable runnable) {
-		if (SwingUtilities.isEventDispatchThread()) {
-			runnable.run();
-			return;
-		}
-		try {
-			SwingUtilities.invokeAndWait(runnable);
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-			log.warn("Interrupted while waiting for dialog on EDT: {}", e.getMessage());
-		} catch (Exception e) {
-			log.warn("Failed to run dialog on EDT: {}", e.getMessage());
+	private static void dispose(AtomicReference<JDialog> visibleDialog) {
+		JDialog dialog = visibleDialog.get();
+		if (dialog != null) {
+			dialog.dispose();
 		}
 	}
 

@@ -25,6 +25,7 @@ import java.awt.KeyboardFocusManager;
 import java.awt.Window;
 import java.awt.event.ActionEvent;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
@@ -38,7 +39,6 @@ import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 
 import dev.nuclr.platform.plugin.NuclrResource;
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * Modal confirmation and error popups for the archive delete operation, rendered by the plugin.
@@ -48,7 +48,6 @@ import lombok.extern.slf4j.Slf4j;
  * button. Methods may be called from any thread — they marshal to the EDT internally and block
  * for the user's answer.
  */
-@Slf4j
 final class DeleteDialogs {
 
 	private static final String TITLE = "Delete";
@@ -114,10 +113,12 @@ final class DeleteDialogs {
 	private static boolean choose(String title, Component message, String proceedText, String safeText) {
 
 		final boolean[] proceed = { false };
+		var visibleDialog = new AtomicReference<JDialog>();
 
 		Runnable show = () -> {
 			Window owner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
 			JDialog dialog = new JDialog(owner, title, JDialog.ModalityType.APPLICATION_MODAL);
+			visibleDialog.set(dialog);
 			dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
 
 			JButton proceedButton = new JButton(proceedText);
@@ -156,11 +157,21 @@ final class DeleteDialogs {
 			dialog.pack();
 			dialog.setLocationRelativeTo(owner);
 			SwingUtilities.invokeLater(safeButton::requestFocusInWindow);
-			dialog.setVisible(true); // blocks (modal) until disposed
+			try {
+				dialog.setVisible(true); // blocks (modal) until disposed
+			} finally {
+				visibleDialog.compareAndSet(dialog, null);
+				dialog.dispose();
+			}
 		};
 
-		runOnEdtAndWait(show);
-		return proceed[0];
+		boolean completed = SwingDialogRunner.runAndWait("delete dialog", show, () -> {
+			JDialog dialog = visibleDialog.get();
+			if (dialog != null) {
+				dialog.dispose();
+			}
+		});
+		return completed && proceed[0];
 	}
 
 	/** Left arrow focuses the left button, Right arrow the right button (in addition to Tab). */
@@ -185,18 +196,4 @@ final class DeleteDialogs {
 		});
 	}
 
-	private static void runOnEdtAndWait(Runnable runnable) {
-		if (SwingUtilities.isEventDispatchThread()) {
-			runnable.run();
-			return;
-		}
-		try {
-			SwingUtilities.invokeAndWait(runnable);
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-			log.warn("Interrupted while waiting for delete dialog on EDT: {}", e.getMessage(), e);
-		} catch (Exception e) {
-			log.warn("Failed to run delete dialog on EDT: {}", e.getMessage(), e);
-		}
-	}
 }

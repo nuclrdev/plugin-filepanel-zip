@@ -21,12 +21,14 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
 
+import javax.swing.JDialog;
 import javax.swing.JOptionPane;
-import javax.swing.SwingUtilities;
 
 import dev.nuclr.platform.plugin.NuclrPluginCallback;
 import dev.nuclr.platform.plugin.NuclrResource;
+import dev.nuclr.plugin.core.mount.zip.SwingDialogRunner;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
@@ -93,28 +95,46 @@ public class MakeNewFolderService {
 	}
 
 	private static String promptFolderName() {
-		final String[] result = new String[1];
-		runOnEdtAndWait(() -> result[0] = JOptionPane.showInputDialog(null, "Folder name:", DialogTitle,
-				JOptionPane.PLAIN_MESSAGE));
-		return result[0];
+		final Object[] result = new Object[1];
+		var visibleDialog = new AtomicReference<JDialog>();
+		boolean completed = SwingDialogRunner.runAndWait("make-folder dialog", () -> {
+			var pane = new JOptionPane("Folder name:", JOptionPane.PLAIN_MESSAGE, JOptionPane.OK_CANCEL_OPTION);
+			pane.setWantsInput(true);
+			JDialog dialog = pane.createDialog(null, DialogTitle);
+			visibleDialog.set(dialog);
+			try {
+				dialog.setVisible(true);
+				if (Integer.valueOf(JOptionPane.OK_OPTION).equals(pane.getValue())
+						&& pane.getInputValue() != JOptionPane.UNINITIALIZED_VALUE) {
+					result[0] = pane.getInputValue();
+				}
+			} finally {
+				visibleDialog.compareAndSet(dialog, null);
+				dialog.dispose();
+			}
+		}, () -> dispose(visibleDialog));
+		return completed && result[0] != null ? result[0].toString() : null;
 	}
 
 	private static void showError(String message) {
-		runOnEdtAndWait(() -> JOptionPane.showMessageDialog(null, message, DialogTitle, JOptionPane.ERROR_MESSAGE));
+		var visibleDialog = new AtomicReference<JDialog>();
+		SwingDialogRunner.runAndWait("make-folder error dialog", () -> {
+			var pane = new JOptionPane(message, JOptionPane.ERROR_MESSAGE, JOptionPane.DEFAULT_OPTION);
+			JDialog dialog = pane.createDialog(null, DialogTitle);
+			visibleDialog.set(dialog);
+			try {
+				dialog.setVisible(true);
+			} finally {
+				visibleDialog.compareAndSet(dialog, null);
+				dialog.dispose();
+			}
+		}, () -> dispose(visibleDialog));
 	}
 
-	private static void runOnEdtAndWait(Runnable runnable) {
-		if (SwingUtilities.isEventDispatchThread()) {
-			runnable.run();
-			return;
-		}
-		try {
-			SwingUtilities.invokeAndWait(runnable);
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-			log.warn("Interrupted while waiting for dialog on EDT: {}", e.getMessage(), e);
-		} catch (Exception e) {
-			log.warn("Failed to run dialog on EDT: {}", e.getMessage(), e);
+	private static void dispose(AtomicReference<JDialog> visibleDialog) {
+		JDialog dialog = visibleDialog.get();
+		if (dialog != null) {
+			dialog.dispose();
 		}
 	}
 
