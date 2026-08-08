@@ -34,10 +34,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -113,6 +116,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private static final String ActionMakeFolder = "filepanel.makeFolder";
 	private static final String ActionDelete = "filepanel.delete";
 	private static final String ActionDeletePermanent = "filepanel.deletePermanent";
+	/** Internal handshake value binding a queued transfer to the folder visible at dispatch time. */
+	private static final String DataArchiveDestinationPath = PluginId + ".destination.path";
 	/** Establishes one lock order before a transfer touches two independently mounted archives. */
 	private static final ReentrantLock CrossArchiveMutationLock = new ReentrantLock(true);
 
@@ -156,6 +161,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	/** Serialises archive mutations without occupying Swing's event-dispatch thread. */
 	private final ExecutorService mutationExecutor = Executors.newSingleThreadExecutor(
 			Thread.ofVirtual().name("archive-mutation-" + uuid).factory());
+	private final ThreadLocal<Boolean> mutationExecutorContext = new ThreadLocal<>();
 
 	/** Guards mutation startup against archive resource cleanup during unload. */
 	private final Object mutationLifecycleLock = new Object();
@@ -205,7 +211,11 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			}
 			threadsToInterrupt = List.copyOf(activeMutationThreads.keySet());
 		}
-		mutationExecutor.shutdownNow();
+		for (Runnable queued : mutationExecutor.shutdownNow()) {
+			if (queued instanceof Future<?> future) {
+				future.cancel(false);
+			}
+		}
 		threadsToInterrupt.stream()
 				.filter(thread -> thread != Thread.currentThread())
 				.forEach(Thread::interrupt);
@@ -1060,9 +1070,14 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (ActionCopy.equals(actionType)) {
 			BaseNuclrPlugin destination = other == null || other.uuid().equals(uuid)
 					|| other.is(BaseNuclrPlugin.Type.QuickView) ? this : other;
+			Map<String, Object> transferData = destination instanceof ZipFilePanelPlugin archiveDestination
+					? withDestinationSnapshot(data, archiveDestination)
+					: data;
+			BaseNuclrPlugin transferSource = destination instanceof ZipFilePanelPlugin ? this : null;
 			Runnable transfer = () -> {
 				try {
-					destination.act(null, ActionAcceptCopy, selectedResources, focusedResource, data, callback);
+					destination.act(
+							transferSource, ActionAcceptCopy, selectedResources, focusedResource, transferData, callback);
 				} finally {
 					// A receiving plugin normally refreshes its own panel, but its emit sits after the
 					// transfer: anything that escapes the copy (a failed item, an error from a listener
@@ -1086,17 +1101,21 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		if (ActionAcceptCopy.equals(actionType)) {
 			List<Path> paths = ArchiveCopyService.selectedPaths(selectedResources, focusedResource);
-			Path destination = currentFolder != null ? currentFolder.getPath() : null;
-			runArchiveMutation(() -> copyIntoArchive(destination, paths, callback));
+			Path destination = destinationPath(data);
+			runArchiveMutation(() -> executeWithSourceArchive(
+					other, () -> copyIntoArchive(destination, paths, callback)));
 			return;
 		}
 
 		if (ActionMove.equals(actionType)) {
 			boolean inPlace = other == null || other.uuid().equals(uuid)
 					|| other.is(BaseNuclrPlugin.Type.QuickView);
+			Map<String, Object> transferData = !inPlace && other instanceof ZipFilePanelPlugin archiveDestination
+					? withDestinationSnapshot(data, archiveDestination)
+					: data;
 			var selectAfter = new AtomicReference<NuclrResource>();
 			Runnable transfer = () -> selectAfter.set(
-					moveFromArchive(other, selectedResources, focusedResource, data, callback));
+					moveFromArchive(other, selectedResources, focusedResource, transferData, callback));
 			if (inPlace) {
 				runArchiveMutationAndWait(transfer);
 				if (selectAfter.get() != null) {
@@ -1113,8 +1132,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		if (ActionAcceptMove.equals(actionType)) {
 			List<Path> paths = ArchiveCopyService.selectedPaths(selectedResources, focusedResource);
-			Path destination = currentFolder != null ? currentFolder.getPath() : null;
-			runArchiveMutation(() -> moveIntoArchive(destination, paths, callback));
+			Path destination = destinationPath(data);
+			runArchiveMutation(() -> executeWithSourceArchive(
+					other, () -> moveIntoArchive(destination, paths, callback)));
 			return;
 		}
 
@@ -1144,6 +1164,29 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 	}
 
+	private static Map<String, Object> withDestinationSnapshot(Map<String, Object> data,
+			ZipFilePanelPlugin destination) {
+		var snapshot = data != null ? new HashMap<>(data) : new HashMap<String, Object>();
+		snapshot.put(DataArchiveDestinationPath,
+				destination.currentFolder != null ? destination.currentFolder.getPath() : null);
+		return snapshot;
+	}
+
+	private Path destinationPath(Map<String, Object> data) {
+		if (data != null && data.containsKey(DataArchiveDestinationPath)) {
+			return data.get(DataArchiveDestinationPath) instanceof Path path ? path : null;
+		}
+		return currentFolder != null ? currentFolder.getPath() : null;
+	}
+
+	private void executeWithSourceArchive(BaseNuclrPlugin source, Runnable mutation) {
+		if (source instanceof ZipFilePanelPlugin archiveSource && archiveSource != this) {
+			archiveSource.executeArchiveMutation(mutation);
+		} else {
+			mutation.run();
+		}
+	}
+
 	private NuclrResource moveFromArchive(BaseNuclrPlugin destination, List<NuclrResource> selectedResources,
 			NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
 		if (!isWritableArchive()) {
@@ -1167,7 +1210,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 
 		try {
-			destination.act(null, ActionAcceptMove, selectedResources, focusedResource, data, callback);
+			destination.act(destination instanceof ZipFilePanelPlugin ? this : null,
+					ActionAcceptMove, selectedResources, focusedResource, data, callback);
 		} finally {
 			// A move changes both panes. The receiver normally refreshes itself; these
 			// requests also cover partial failures before its own refresh is reached.
@@ -1267,38 +1311,79 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	/**
-	 * Run a potentially large mutation inline for an existing worker caller, or enqueue it when
-	 * an SDK action arrives on Swing's event-dispatch thread. The fair mutation lock also orders
-	 * calls nested from another archive's worker with work already queued on this archive.
+	 * Queue potentially large work on this archive's executor, executing inline only for a
+	 * re-entrant call already on that executor. This preserves FIFO ordering for accept actions
+	 * arriving from another archive's worker.
 	 */
 	private void runArchiveMutation(Runnable mutation) {
-		runArchiveMutation(mutation, false);
-	}
-
-	private void runCrossArchiveMutation(Runnable mutation) {
-		runArchiveMutation(mutation, true);
-	}
-
-	private void runArchiveMutation(Runnable mutation, boolean crossArchive) {
-		Runnable orderedMutation = crossArchive
-				? () -> executeCrossArchiveMutation(mutation)
-				: () -> executeArchiveMutation(mutation);
-		if (!SwingUtilities.isEventDispatchThread()) {
-			orderedMutation.run();
+		if (Boolean.TRUE.equals(mutationExecutorContext.get())) {
+			executeArchiveMutation(mutation);
+			return;
+		}
+		if (SwingUtilities.isEventDispatchThread()) {
+			try {
+				mutationExecutor.execute(() -> {
+					try {
+						executeOnMutationExecutor(mutation);
+					} catch (RuntimeException e) {
+						// There is no synchronous caller to receive failures after act() has returned.
+						log.error("Archive mutation failed for {}: {}", archiveDisplayName, e.getMessage(), e);
+					}
+				});
+			} catch (RejectedExecutionException e) {
+				log.debug("Ignoring archive mutation submitted while {} is unloading", archiveDisplayName);
+			}
 			return;
 		}
 
+		Future<?> queued;
 		try {
-			mutationExecutor.execute(() -> {
-				try {
-					orderedMutation.run();
-				} catch (RuntimeException e) {
-					// There is no synchronous caller to receive failures after act() has returned.
-					log.error("Archive mutation failed for {}: {}", archiveDisplayName, e.getMessage(), e);
-				}
-			});
+			queued = mutationExecutor.submit(() -> executeOnMutationExecutor(mutation));
 		} catch (RejectedExecutionException e) {
 			log.debug("Ignoring archive mutation submitted while {} is unloading", archiveDisplayName);
+			return;
+		}
+		try {
+			queued.get();
+		} catch (InterruptedException e) {
+			queued.cancel(true);
+			Thread.currentThread().interrupt();
+			log.debug("Interrupted while waiting for archive mutation in {}", archiveDisplayName);
+		} catch (ExecutionException e) {
+			if (e.getCause() instanceof RuntimeException runtime) {
+				throw runtime;
+			}
+			if (e.getCause() instanceof Error error) {
+				throw error;
+			}
+			throw new IllegalStateException(e.getCause());
+		} catch (CancellationException e) {
+			log.debug("Queued archive mutation cancelled while {} is unloading", archiveDisplayName);
+		}
+	}
+
+	private void runCrossArchiveMutation(Runnable mutation) {
+		Runnable coordinated = () -> executeCrossArchiveMutation(mutation);
+		if (!SwingUtilities.isEventDispatchThread() && !mutationLock.isHeldByCurrentThread()) {
+			coordinated.run();
+			return;
+		}
+
+		Thread.startVirtualThread(() -> {
+			try {
+				coordinated.run();
+			} catch (RuntimeException e) {
+				log.error("Cross-archive mutation failed for {}: {}", archiveDisplayName, e.getMessage(), e);
+			}
+		});
+	}
+
+	private void executeOnMutationExecutor(Runnable mutation) {
+		mutationExecutorContext.set(Boolean.TRUE);
+		try {
+			executeArchiveMutation(mutation);
+		} finally {
+			mutationExecutorContext.remove();
 		}
 	}
 
@@ -1307,9 +1392,10 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		try {
 			CrossArchiveMutationLock.lockInterruptibly();
 			locked = true;
-			executeArchiveMutation(mutation);
+			mutation.run();
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
+			log.debug("Archive mutation interrupted before execution for {}", archiveDisplayName);
 		} finally {
 			if (locked) {
 				CrossArchiveMutationLock.unlock();

@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -216,6 +217,156 @@ class ArchiveCopyServiceTest {
 		assertTrue(copyFinished);
 		assertFalse(callback.calledOnEdt);
 		assertEquals("background", copied);
+	}
+
+	@Test
+	void queuedZipCopyKeepsTheDestinationFolderFromDispatchTime() throws Exception {
+		Path archive = tempDir.resolve("captured-destination.zip");
+		try (var zip = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			Files.createDirectory(zip.getPath("/nested"));
+		}
+		Path incoming = Files.writeString(tempDir.resolve("captured.txt"), "captured");
+		var context = new TestContext(new RecordingEventBus());
+		var source = new ZipFilePanelPlugin();
+		var destination = new NavigatingZipPlugin();
+		destination.preinit(context);
+		destination.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+		Path destinationRoot = destination.getCurrentResource().getPath();
+		destination.navigateBeforeAccept(
+				ArchiveNuclrResource.build(context, destinationRoot.resolve("nested")));
+
+		try {
+			source.act(destination, "filepanel.copy",
+					List.of(new ZipFileNuclrResource(context, incoming)), null, new HashMap<>(), null);
+
+			assertEquals("captured", Files.readString(destinationRoot.resolve("captured.txt")));
+			assertFalse(Files.exists(destinationRoot.resolve("nested/captured.txt")));
+		} finally {
+			source.unload();
+			destination.unload();
+		}
+	}
+
+	@Test
+	void queuedZipMoveKeepsTheDestinationFolderFromDispatchTime() throws Exception {
+		Path sourceArchive = tempDir.resolve("captured-move-source.zip");
+		try (var zip = FileSystems.newFileSystem(sourceArchive, Map.of("create", "true"))) {
+			Files.writeString(zip.getPath("/moving.txt"), "moving");
+		}
+		Path destinationArchive = tempDir.resolve("captured-move-destination.zip");
+		try (var zip = FileSystems.newFileSystem(destinationArchive, Map.of("create", "true"))) {
+			Files.createDirectory(zip.getPath("/nested"));
+		}
+		var context = new TestContext(new RecordingEventBus());
+		var source = new ZipFilePanelPlugin();
+		var destination = new NavigatingZipPlugin();
+		source.preinit(context);
+		destination.preinit(context);
+		source.openResource(new ZipFileNuclrResource(context, sourceArchive), new AtomicBoolean(false));
+		destination.openResource(
+				new ZipFileNuclrResource(context, destinationArchive), new AtomicBoolean(false));
+		Path sourceRoot = source.getCurrentResource().getPath();
+		Path destinationRoot = destination.getCurrentResource().getPath();
+		destination.navigateBeforeAccept(
+				ArchiveNuclrResource.build(context, destinationRoot.resolve("nested")));
+
+		try {
+			NuclrResource moving = ArchiveNuclrResource.build(context, sourceRoot.resolve("moving.txt"));
+			source.act(destination, "filepanel.move", List.of(moving), moving, new HashMap<>(), null);
+
+			assertFalse(Files.exists(sourceRoot.resolve("moving.txt")));
+			assertEquals("moving", Files.readString(destinationRoot.resolve("moving.txt")));
+			assertFalse(Files.exists(destinationRoot.resolve("nested/moving.txt")));
+		} finally {
+			source.unload();
+			destination.unload();
+		}
+	}
+
+	@Test
+	void crossArchiveCopyDoesNotOvertakeDestinationQueue() throws Exception {
+		Path archive = tempDir.resolve("ordered-destination.zip");
+		try (var ignored = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			// Create a valid empty ZIP.
+		}
+		Path held = Files.writeString(tempDir.resolve("held-order.txt"), "held");
+		Path queued = Files.writeString(tempDir.resolve("queued-order.txt"), "queued");
+		Path cross = Files.writeString(tempDir.resolve("cross-order.txt"), "cross");
+		var context = new TestContext(new RecordingEventBus());
+		var source = new ZipFilePanelPlugin();
+		var destination = new OrderingZipPlugin("cross-order.txt");
+		destination.preinit(context);
+		destination.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+		var blocker = new BlockingCallback();
+		var completionOrder = new CopyOnWriteArrayList<String>();
+		var queuedCallback = new OrderingCallback("queued", completionOrder);
+		var crossCallback = new OrderingCallback("cross", completionOrder);
+
+		try {
+			SwingUtilities.invokeAndWait(() -> destination.act(null, "accept.copy",
+					List.of(new ZipFileNuclrResource(context, held)), null, new HashMap<>(), blocker));
+			assertTrue(blocker.started.await(5, TimeUnit.SECONDS));
+			SwingUtilities.invokeAndWait(() -> destination.act(null, "accept.copy",
+					List.of(new ZipFileNuclrResource(context, queued)), null, new HashMap<>(), queuedCallback));
+
+			Thread crossThread = Thread.startVirtualThread(() -> source.act(destination, "filepanel.copy",
+					List.of(new ZipFileNuclrResource(context, cross)), null, new HashMap<>(), crossCallback));
+			boolean crossReachedDestination = destination.crossAcceptEntered.await(5, TimeUnit.SECONDS);
+			blocker.release.countDown();
+			boolean queuedFinished = queuedCallback.finished.await(5, TimeUnit.SECONDS);
+			boolean crossFinished = crossCallback.finished.await(5, TimeUnit.SECONDS);
+			crossThread.join(5_000);
+
+			assertTrue(crossReachedDestination);
+			assertTrue(queuedFinished);
+			assertTrue(crossFinished);
+			assertFalse(crossThread.isAlive());
+			assertEquals(List.of("queued", "cross"), completionOrder);
+		} finally {
+			blocker.release.countDown();
+			source.unload();
+			destination.unload();
+		}
+	}
+
+	@Test
+	void unloadingDestinationReleasesCrossCallerQueuedOnItsExecutor() throws Exception {
+		Path archive = tempDir.resolve("unload-queued-destination.zip");
+		try (var ignored = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			// Create a valid empty ZIP.
+		}
+		Path held = Files.writeString(tempDir.resolve("held-unload.txt"), "held");
+		Path cross = Files.writeString(tempDir.resolve("cross-unload.txt"), "cross");
+		var context = new TestContext(new RecordingEventBus());
+		var source = new ZipFilePanelPlugin();
+		var destination = new OrderingZipPlugin("cross-unload.txt");
+		destination.preinit(context);
+		destination.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+		var blocker = new UninterruptibleBlockingCallback();
+		var unloadStarted = new CountDownLatch(1);
+		var unloadReturned = new CountDownLatch(1);
+
+		SwingUtilities.invokeAndWait(() -> destination.act(null, "accept.copy",
+				List.of(new ZipFileNuclrResource(context, held)), null, new HashMap<>(), blocker));
+		assertTrue(blocker.started.await(5, TimeUnit.SECONDS));
+		Thread crossThread = Thread.startVirtualThread(() -> source.act(destination, "filepanel.copy",
+				List.of(new ZipFileNuclrResource(context, cross)), null, new HashMap<>(), null));
+		assertTrue(destination.crossAcceptEntered.await(5, TimeUnit.SECONDS));
+
+		SwingUtilities.invokeLater(() -> {
+			unloadStarted.countDown();
+			destination.unload();
+			unloadReturned.countDown();
+		});
+		assertTrue(unloadStarted.await(5, TimeUnit.SECONDS));
+		crossThread.join(5_000);
+		boolean crossCallerReleased = !crossThread.isAlive();
+		blocker.release.countDown();
+		boolean unloadFinished = unloadReturned.await(5, TimeUnit.SECONDS);
+		source.unload();
+
+		assertTrue(crossCallerReleased);
+		assertTrue(unloadFinished);
 	}
 
 	@Test
@@ -665,6 +816,47 @@ class ArchiveCopyServiceTest {
 		}
 	}
 
+	private static final class NavigatingZipPlugin extends ZipFilePanelPlugin {
+		private NuclrResource folderToOpen;
+
+		private void navigateBeforeAccept(NuclrResource folder) {
+			folderToOpen = folder;
+		}
+
+		@Override
+		public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
+				NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+			if (("accept.copy".equals(actionType) || "accept.move".equals(actionType))
+					&& folderToOpen != null) {
+				NuclrResource folder = folderToOpen;
+				folderToOpen = null;
+				openResource(folder, new AtomicBoolean(false));
+			}
+			super.act(other, actionType, selectedResources, focusedResource, data, callback);
+		}
+	}
+
+	private static final class OrderingZipPlugin extends ZipFilePanelPlugin {
+		private final String crossFileName;
+		private final CountDownLatch crossAcceptEntered = new CountDownLatch(1);
+
+		private OrderingZipPlugin(String crossFileName) {
+			this.crossFileName = crossFileName;
+		}
+
+		@Override
+		public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
+				NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+			if ("accept.copy".equals(actionType) && ArchiveCopyService
+					.selectedPaths(selectedResources, focusedResource).stream()
+					.anyMatch(path -> path.getFileName() != null
+							&& crossFileName.equals(path.getFileName().toString()))) {
+				crossAcceptEntered.countDown();
+			}
+			super.act(other, actionType, selectedResources, focusedResource, data, callback);
+		}
+	}
+
 	private static final class BlockingCallback implements NuclrPluginCallback {
 		private final CountDownLatch started = new CountDownLatch(1);
 		private final CountDownLatch release = new CountDownLatch(1);
@@ -712,6 +904,26 @@ class ArchiveCopyServiceTest {
 		@Override public void onProgress(long current, long total) { }
 		@Override public void onComplete() { }
 		@Override public void onError(String description, Exception e) { }
+		@Override public boolean isCancelled() { return false; }
+	}
+
+	private static final class OrderingCallback implements NuclrPluginCallback {
+		private final String label;
+		private final List<String> completionOrder;
+		private final CountDownLatch finished = new CountDownLatch(1);
+
+		private OrderingCallback(String label, List<String> completionOrder) {
+			this.label = label;
+			this.completionOrder = completionOrder;
+		}
+
+		@Override public void onStart(String description) { }
+		@Override public void onProgress(long current, long total) { }
+		@Override public void onComplete() {
+			completionOrder.add(label);
+			finished.countDown();
+		}
+		@Override public void onError(String description, Exception e) { finished.countDown(); }
 		@Override public boolean isCancelled() { return false; }
 	}
 
