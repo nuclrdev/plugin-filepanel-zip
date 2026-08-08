@@ -192,6 +192,9 @@ final class DeleteDialogs {
 		}
 		try {
 			SwingUtilities.invokeAndWait(runnable);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			log.warn("Interrupted while waiting for delete dialog on EDT: {}", e.getMessage(), e);
 		} catch (Exception e) {
 			log.warn("Failed to run delete dialog on EDT: {}", e.getMessage(), e);
 		}

@@ -48,7 +48,7 @@ public class MakeNewFolderService {
 		}
 
 		String folderName = promptFolderName();
-		if (folderName == null) {
+		if (folderName == null || Thread.currentThread().isInterrupted()) {
 			return null;
 		}
 		folderName = folderName.trim();
@@ -110,6 +110,9 @@ public class MakeNewFolderService {
 		}
 		try {
 			SwingUtilities.invokeAndWait(runnable);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			log.warn("Interrupted while waiting for dialog on EDT: {}", e.getMessage(), e);
 		} catch (Exception e) {
 			log.warn("Failed to run dialog on EDT: {}", e.getMessage(), e);
 		}

@@ -180,7 +180,7 @@ final class ArchiveCopyService {
 	}
 
 	private static boolean cancelled(NuclrPluginCallback callback) {
-		return callback != null && callback.isCancelled();
+		return Thread.currentThread().isInterrupted() || callback != null && callback.isCancelled();
 	}
 
 	private static void progress(NuclrPluginCallback callback, long current, long total) {

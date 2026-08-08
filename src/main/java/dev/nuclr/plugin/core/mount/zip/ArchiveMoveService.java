@@ -42,7 +42,7 @@ final class ArchiveMoveService {
 		}
 
 		String newName = promptName(source.getFileName().toString());
-		if (newName == null) {
+		if (newName == null || Thread.currentThread().isInterrupted()) {
 			return null;
 		}
 
@@ -161,6 +161,9 @@ final class ArchiveMoveService {
 		}
 		try {
 			SwingUtilities.invokeAndWait(runnable);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			log.warn("Interrupted while waiting for rename dialog on EDT: {}", e.getMessage(), e);
 		} catch (Exception e) {
 			log.warn("Failed to run rename dialog on EDT: {}", e.getMessage(), e);
 		}

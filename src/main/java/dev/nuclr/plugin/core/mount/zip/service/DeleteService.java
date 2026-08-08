@@ -53,7 +53,7 @@ public final class DeleteService {
 
 		for (NuclrResource src : sources) {
 
-			if (cb != null && cb.isCancelled()) {
+			if (cancelled(cb)) {
 				return;
 			}
 
@@ -69,7 +69,7 @@ public final class DeleteService {
 
 			try {
 				deleteRecursively(path, cb);
-				if (cb != null && cb.isCancelled()) {
+				if (cancelled(cb)) {
 					return; // cancelled mid-item: it may be only partially deleted, do not report success
 				}
 				if (cb != null) {
@@ -90,7 +90,7 @@ public final class DeleteService {
 
 	private static void deleteRecursively(Path path, NuclrPluginCallback cb) throws IOException {
 
-		if (cb != null && cb.isCancelled()) {
+		if (cancelled(cb)) {
 			return;
 		}
 
@@ -104,7 +104,7 @@ public final class DeleteService {
 		if (attrs.isDirectory()) {
 			try (DirectoryStream<Path> children = Files.newDirectoryStream(path)) {
 				for (Path child : children) {
-					if (cb != null && cb.isCancelled()) {
+					if (cancelled(cb)) {
 						return;
 					}
 					deleteRecursively(child, cb);
@@ -112,7 +112,7 @@ public final class DeleteService {
 			}
 		}
 
-		if (cb != null && cb.isCancelled()) {
+		if (cancelled(cb)) {
 			return; // cancelled before removing this entry (a directory may be left partially emptied)
 		}
 
@@ -128,5 +128,9 @@ public final class DeleteService {
 		}
 		Path fileName = path.getFileName();
 		return fileName != null ? fileName.toString() : path.toString();
+	}
+
+	private static boolean cancelled(NuclrPluginCallback callback) {
+		return Thread.currentThread().isInterrupted() || callback != null && callback.isCancelled();
 	}
 }

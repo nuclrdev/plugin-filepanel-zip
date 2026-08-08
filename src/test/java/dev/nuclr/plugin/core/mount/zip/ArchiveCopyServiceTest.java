@@ -20,8 +20,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
+
+import javax.swing.SwingUtilities;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -150,20 +154,152 @@ class ArchiveCopyServiceTest {
 	}
 
 	@Test
-	void copyOutOfTheArchiveRefreshesTheReceivingPanel() {
+	void copyActionDoesNotBlockSwingsEventDispatchThread() throws Exception {
+		var source = new ZipFilePanelPlugin();
+		var destination = new BlockingZipPlugin();
+		var actionReturned = new CountDownLatch(1);
+
+		SwingUtilities.invokeLater(() -> {
+			try {
+				source.act(destination, "filepanel.copy", List.of(), null, new HashMap<>(), null);
+			} finally {
+				actionReturned.countDown();
+			}
+		});
+
+		boolean receiverStarted = destination.started.await(5, TimeUnit.SECONDS);
+		boolean returnedBeforeReceiverFinished = actionReturned.await(1, TimeUnit.SECONDS);
+		destination.release.countDown();
+		boolean receiverFinished = destination.finished.await(5, TimeUnit.SECONDS);
+		source.unload();
+		destination.unload();
+
+		assertTrue(receiverStarted);
+		assertTrue(returnedBeforeReceiverFinished);
+		assertTrue(receiverFinished);
+		assertFalse(destination.calledOnEdt);
+	}
+
+	@Test
+	void acceptCopyDoesNotBlockSwingsEventDispatchThread() throws Exception {
+		Path archive = tempDir.resolve("background-copy.zip");
+		try (var ignored = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			// Create a valid empty ZIP.
+		}
+		Path incoming = Files.writeString(tempDir.resolve("background.txt"), "background");
+		var context = new TestContext(new RecordingEventBus());
+		var plugin = new ZipFilePanelPlugin();
+		plugin.preinit(context);
+		plugin.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+		var callback = new BlockingCallback();
+		var actionReturned = new CountDownLatch(1);
+
+		SwingUtilities.invokeLater(() -> {
+			try {
+				plugin.act(null, "accept.copy", List.of(new ZipFileNuclrResource(context, incoming)), null,
+						new HashMap<>(), callback);
+			} finally {
+				actionReturned.countDown();
+			}
+		});
+
+		boolean copyStarted = callback.started.await(5, TimeUnit.SECONDS);
+		boolean returnedBeforeCopyFinished = actionReturned.await(1, TimeUnit.SECONDS);
+		callback.release.countDown();
+		boolean copyFinished = callback.finished.await(5, TimeUnit.SECONDS);
+		flushEdt();
+		String copied = Files.readString(plugin.getCurrentResource().getPath().resolve("background.txt"));
+		plugin.unload();
+
+		assertTrue(copyStarted);
+		assertTrue(returnedBeforeCopyFinished);
+		assertTrue(copyFinished);
+		assertFalse(callback.calledOnEdt);
+		assertEquals("background", copied);
+	}
+
+	@Test
+	void unloadWaitsForActiveMutationWithoutFreezingSwing() throws Exception {
+		Path archive = tempDir.resolve("unload-active.zip");
+		try (var ignored = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			// Create a valid empty ZIP.
+		}
+		Path incoming = Files.writeString(tempDir.resolve("held.txt"), "held");
+		var context = new TestContext(new RecordingEventBus());
+		var plugin = new ZipFilePanelPlugin();
+		plugin.preinit(context);
+		plugin.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+		var callback = new UninterruptibleBlockingCallback();
+
+		SwingUtilities.invokeAndWait(() -> plugin.act(null, "accept.copy",
+				List.of(new ZipFileNuclrResource(context, incoming)), null, new HashMap<>(), callback));
+		assertTrue(callback.started.await(5, TimeUnit.SECONDS));
+
+		var unloadStarted = new CountDownLatch(1);
+		var unloadReturned = new CountDownLatch(1);
+		var swingProbe = new CountDownLatch(1);
+		SwingUtilities.invokeLater(() -> {
+			unloadStarted.countDown();
+			plugin.unload();
+			unloadReturned.countDown();
+		});
+		assertTrue(unloadStarted.await(5, TimeUnit.SECONDS));
+		SwingUtilities.invokeLater(swingProbe::countDown);
+
+		boolean swingStayedResponsive = swingProbe.await(5, TimeUnit.SECONDS);
+		boolean unloadReturnedBeforeMutation = unloadReturned.getCount() == 0;
+		callback.release.countDown();
+		boolean unloadFinished = unloadReturned.await(5, TimeUnit.SECONDS);
+
+		assertTrue(swingStayedResponsive);
+		assertFalse(unloadReturnedBeforeMutation);
+		assertTrue(unloadFinished);
+		try (var remounted = FileSystems.newFileSystem(archive)) {
+			assertFalse(Files.exists(remounted.getPath("/held.txt")));
+		}
+	}
+
+	@Test
+	void asynchronousRenamePublishesSelectionBeforeActionReturns() throws Exception {
+		Path archive = tempDir.resolve("rename-action.zip");
+		try (var zip = FileSystems.newFileSystem(archive, Map.of("create", "true"))) {
+			Files.writeString(zip.getPath("/before.txt"), "content");
+		}
+		var context = new TestContext(new RecordingEventBus());
+		var plugin = new NonInteractiveRenamePlugin();
+		plugin.preinit(context);
+		plugin.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false));
+		NuclrResource source = ArchiveNuclrResource.build(context,
+				plugin.getCurrentResource().getPath().resolve("before.txt"));
+		var payload = new HashMap<String, Object>();
+
+		SwingUtilities.invokeAndWait(() -> plugin.act(
+				null, "filepanel.move", List.of(source), source, payload, null));
+
+		assertEquals(Boolean.TRUE, payload.get("result.refresh"));
+		NuclrResource selected = assertInstanceOf(
+				NuclrResource.class, payload.get("result.refresh.selected.resource"));
+		assertEquals("after.txt", selected.getName());
+		assertTrue(Files.exists(selected.getPath()));
+		plugin.unload();
+	}
+
+	@Test
+	void copyOutOfTheArchiveRefreshesTheReceivingPanel() throws Exception {
 		var bus = new RecordingEventBus();
 		var source = new ZipFilePanelPlugin();
 		source.preinit(new TestContext(bus));
 		var destination = new RecordingZipPlugin();
 
 		source.act(destination, "filepanel.copy", List.of(), null, new HashMap<>(), null);
+		flushEdt();
 
 		assertEquals("refresh.plugin.file.panel", bus.type);
 		assertEquals(destination.uuid(), bus.event.get("plugin.uuid"));
 	}
 
 	@Test
-	void theReceivingPanelIsRefreshedEvenWhenTheCopyBlowsUp() {
+	void theReceivingPanelIsRefreshedEvenWhenTheCopyBlowsUp() throws Exception {
 		var bus = new RecordingEventBus();
 		var source = new ZipFilePanelPlugin();
 		source.preinit(new TestContext(bus));
@@ -171,6 +307,7 @@ class ArchiveCopyServiceTest {
 
 		assertThrows(IllegalStateException.class,
 				() -> source.act(destination, "filepanel.copy", List.of(), null, new HashMap<>(), null));
+		flushEdt();
 
 		assertEquals("refresh.plugin.file.panel", bus.type);
 		assertEquals(destination.uuid(), bus.event.get("plugin.uuid"));
@@ -320,6 +457,7 @@ class ArchiveCopyServiceTest {
 
 			plugin.act(null, "accept.move", List.of(new ZipFileNuclrResource(context, source)), null,
 					new HashMap<>(), null);
+			flushEdt();
 
 			assertFalse(Files.exists(source));
 			assertEquals("incoming", Files.readString(
@@ -372,6 +510,7 @@ class ArchiveCopyServiceTest {
 
 		plugin.act(null, "accept.copy", List.of(new ZipFileNuclrResource(context, source)), null,
 				new HashMap<>(), null);
+		flushEdt();
 
 		assertEquals("incoming", Files.readString(plugin.getCurrentResource().getPath().resolve("incoming.txt")));
 		assertEquals("refresh.plugin.file.panel", bus.type);
@@ -480,6 +619,21 @@ class ArchiveCopyServiceTest {
 		}
 	}
 
+	private static final class NonInteractiveRenamePlugin extends ZipFilePanelPlugin {
+		@Override
+		Path renameArchiveEntry(NuclrResource source, NuclrPluginCallback callback) {
+			try {
+				return ArchiveMoveService.rename(source.getPath(), "after.txt", callback);
+			} catch (IOException e) {
+				throw new RuntimeException(e);
+			}
+		}
+	}
+
+	private static void flushEdt() throws Exception {
+		SwingUtilities.invokeAndWait(() -> { });
+	}
+
 	private static final class RecordingZipPlugin extends ZipFilePanelPlugin {
 		private String actionType;
 
@@ -488,6 +642,77 @@ class ArchiveCopyServiceTest {
 				NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
 			this.actionType = actionType;
 		}
+	}
+
+	private static final class BlockingZipPlugin extends ZipFilePanelPlugin {
+		private final CountDownLatch started = new CountDownLatch(1);
+		private final CountDownLatch release = new CountDownLatch(1);
+		private final CountDownLatch finished = new CountDownLatch(1);
+		private volatile boolean calledOnEdt;
+
+		@Override
+		public void act(BaseNuclrPlugin other, String actionType, List<NuclrResource> selectedResources,
+				NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
+			calledOnEdt = SwingUtilities.isEventDispatchThread();
+			started.countDown();
+			try {
+				release.await();
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			} finally {
+				finished.countDown();
+			}
+		}
+	}
+
+	private static final class BlockingCallback implements NuclrPluginCallback {
+		private final CountDownLatch started = new CountDownLatch(1);
+		private final CountDownLatch release = new CountDownLatch(1);
+		private final CountDownLatch finished = new CountDownLatch(1);
+		private volatile boolean calledOnEdt;
+
+		@Override
+		public void onStart(String description) {
+			calledOnEdt = SwingUtilities.isEventDispatchThread();
+			started.countDown();
+			try {
+				release.await();
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		}
+
+		@Override public void onProgress(long current, long total) { }
+		@Override public void onComplete() { finished.countDown(); }
+		@Override public void onError(String description, Exception e) { finished.countDown(); }
+		@Override public boolean isCancelled() { return false; }
+	}
+
+	private static final class UninterruptibleBlockingCallback implements NuclrPluginCallback {
+		private final CountDownLatch started = new CountDownLatch(1);
+		private final CountDownLatch release = new CountDownLatch(1);
+
+		@Override
+		public void onStart(String description) {
+			started.countDown();
+			boolean interrupted = false;
+			while (true) {
+				try {
+					release.await();
+					break;
+				} catch (InterruptedException e) {
+					interrupted = true;
+				}
+			}
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
+
+		@Override public void onProgress(long current, long total) { }
+		@Override public void onComplete() { }
+		@Override public void onError(String description, Exception e) { }
+		@Override public boolean isCancelled() { return false; }
 	}
 
 	/** Stands in for a receiving plugin whose transfer fails before it can refresh its own panel. */
