@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -18,6 +19,8 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import net.lingala.zip4j.ZipFile;
 import net.lingala.zip4j.model.ZipParameters;
@@ -52,6 +55,17 @@ class ArchiveExtractorTest {
 	}
 
 	@Test
+	void separatorNormalizingZipExtractionRebuildsBackslashFolders() throws Exception {
+		Path archive = createZip("backslash-folders.zip", Map.of("folder\\file.txt", "content"));
+		Path destination = Files.createDirectory(tempDir.resolve("backslash-folders"));
+
+		ArchiveExtractor.extractZipNormalizingSeparators(archive, destination, StandardCharsets.UTF_8,
+				new ArchiveExtractionBudget(10, 100, 100));
+
+		assertEquals("content", Files.readString(destination.resolve("folder/file.txt")));
+	}
+
+	@Test
 	void tarExtractionUsesTheSharedTotalByteBudget() throws Exception {
 		Path archive = tempDir.resolve("content.tar");
 		try (var tar = new TarArchiveOutputStream(Files.newOutputStream(archive))) {
@@ -79,26 +93,79 @@ class ArchiveExtractorTest {
 		assertThrows(ArchiveExtractionBudget.LimitExceededException.class,
 				() -> ArchiveExtractor.extractGzip(archive, destination,
 						new ArchiveExtractionBudget(10, 8, 100)));
-		assertTrue(Files.size(destination.resolve("large.txt")) <= 8);
+		assertTrue(Files.notExists(destination.resolve("large.txt")));
 	}
 
 	@Test
-	void streamedZipExtractionStillHandlesEncryptionAndWrongPasswords() throws Exception {
-		Path source = Files.writeString(tempDir.resolve("secret.txt"), "secret");
-		Path archive = tempDir.resolve("secret.zip");
+	void cancelledGzipExtractionRemovesPartialOutput() throws Exception {
+		Path archive = tempDir.resolve("cancelled.txt.gz");
+		byte[] content = new byte[128 * 1024];
+		try (var gzip = new GZIPOutputStream(Files.newOutputStream(archive))) {
+			gzip.write(content);
+		}
+		Path destination = Files.createDirectory(tempDir.resolve("cancelled-gzip"));
+		Path extracted = destination.resolve("cancelled.txt");
+
+		assertThrows(ArchiveExtractor.ExtractionCancelledException.class,
+				() -> ArchiveExtractor.extractGzip(archive, destination,
+						new ArchiveExtractionBudget(10, content.length, content.length),
+						() -> fileHasContent(extracted)));
+
+		assertTrue(Files.notExists(extracted));
+	}
+
+	@Test
+	void threadInterruptionCancelsExtractionBeforeOutputIsCreated() throws Exception {
+		Path archive = tempDir.resolve("interrupted.txt.gz");
+		try (var gzip = new GZIPOutputStream(Files.newOutputStream(archive))) {
+			gzip.write("content".getBytes(StandardCharsets.UTF_8));
+		}
+		Path destination = Files.createDirectory(tempDir.resolve("interrupted-gzip"));
+
+		Thread.currentThread().interrupt();
+		try {
+			assertThrows(ArchiveExtractor.ExtractionCancelledException.class,
+					() -> ArchiveExtractor.extractGzip(archive, destination));
+		} finally {
+			Thread.interrupted();
+		}
+
+		assertTrue(Files.notExists(destination.resolve("interrupted.txt")));
+	}
+
+	@Test
+	void zipInspectionCanBeCancelledDuringCentralDirectoryReads() throws Exception {
+		Path archive = createZip("inspect.zip",
+				linkedEntries("first.txt", "first", "second.txt", "second", "third.txt", "third"));
+		var polls = new AtomicInteger();
+
+		assertThrows(ArchiveExtractor.ExtractionCancelledException.class,
+				() -> ArchiveExtractor.detectZipEntryCharset(archive,
+						() -> polls.incrementAndGet() >= 5));
+
+		assertTrue(polls.get() >= 5);
+	}
+
+	@ParameterizedTest(name = "{0}")
+	@EnumSource(value = EncryptionMethod.class, names = { "ZIP_STANDARD", "AES" })
+	void streamedZipExtractionHandlesEncryptionAndWrongPasswords(EncryptionMethod encryptionMethod)
+			throws Exception {
+		String prefix = encryptionMethod.name().toLowerCase(java.util.Locale.ROOT);
+		Path source = Files.writeString(tempDir.resolve(prefix + "-secret.txt"), "secret");
+		Path archive = tempDir.resolve(prefix + "-secret.zip");
 		var parameters = new ZipParameters();
 		parameters.setEncryptFiles(true);
-		parameters.setEncryptionMethod(EncryptionMethod.ZIP_STANDARD);
+		parameters.setEncryptionMethod(encryptionMethod);
 		try (var zip = new ZipFile(archive.toFile(), "correct".toCharArray())) {
 			zip.addFile(source.toFile(), parameters);
 		}
 
-		Path destination = Files.createDirectory(tempDir.resolve("correct-password"));
+		Path destination = Files.createDirectory(tempDir.resolve(prefix + "-correct-password"));
 		ArchiveExtractor.extractZip(archive, destination, "correct".toCharArray(), StandardCharsets.UTF_8,
 				new ArchiveExtractionBudget(10, 100, 100));
-		assertEquals("secret", Files.readString(destination.resolve("secret.txt")));
+		assertEquals("secret", Files.readString(destination.resolve(source.getFileName())));
 
-		Path wrongDestination = Files.createDirectory(tempDir.resolve("wrong-password"));
+		Path wrongDestination = Files.createDirectory(tempDir.resolve(prefix + "-wrong-password"));
 		assertThrows(ArchiveExtractor.WrongPasswordException.class,
 				() -> ArchiveExtractor.extractZip(archive, wrongDestination, "wrong".toCharArray(),
 						StandardCharsets.UTF_8, new ArchiveExtractionBudget(10, 100, 100)));
@@ -131,5 +198,13 @@ class ArchiveExtractorTest {
 		tar.putArchiveEntry(entry);
 		tar.write(bytes);
 		tar.closeArchiveEntry();
+	}
+
+	private static boolean fileHasContent(Path file) {
+		try {
+			return Files.exists(file) && Files.size(file) > 0;
+		} catch (IOException e) {
+			return false;
+		}
 	}
 }

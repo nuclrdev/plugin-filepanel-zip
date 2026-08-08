@@ -406,6 +406,34 @@ class ArchiveCopyServiceTest {
 	}
 
 	@Test
+	void cancellingArchiveOpeningPopsTheNewPanel() throws Exception {
+		Path archive = tempDir.resolve("cancelled.tar");
+		try (var tar = new TarArchiveOutputStream(Files.newOutputStream(archive))) {
+			var entry = new TarArchiveEntry("file.txt");
+			entry.setSize(4);
+			tar.putArchiveEntry(entry);
+			tar.write("data".getBytes(StandardCharsets.UTF_8));
+			tar.closeArchiveEntry();
+		}
+
+		var bus = new RecordingEventBus();
+		var context = new TestContext(bus);
+		var plugin = new ZipFilePanelPlugin();
+		plugin.preinit(context);
+
+		Thread.currentThread().interrupt();
+		try {
+			assertNull(plugin.openResource(new ZipFileNuclrResource(context, archive), new AtomicBoolean(false)));
+		} finally {
+			Thread.interrupted();
+		}
+
+		assertEquals("plugin.unload", bus.type);
+		assertEquals(plugin.uuid(), bus.event.get("uuid"));
+		assertInstanceOf(NuclrResource.class, bus.event.get("selectionResource"));
+	}
+
+	@Test
 	void zipNestedInsideAnExtractedArchiveRemainsReadOnly() throws Exception {
 		Path nestedZip = tempDir.resolve("nested.zip");
 		try (var zip = FileSystems.newFileSystem(nestedZip, Map.of("create", "true"))) {

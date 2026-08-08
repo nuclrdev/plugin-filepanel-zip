@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
@@ -234,9 +235,13 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			// Entering an archive file (top-level or a materialised nested archive).
 			if (!Files.isDirectory(target) && ArchiveType.isArchiveFile(target)) {
 				this.readOnlySource = resourceToOpen.getMetadata(ArchiveNuclrResource.KeyReadOnlySource, Boolean.FALSE);
-				return openArchive(target);
+				return openArchive(target, () -> isCancelled(cancelled));
 			}
 
+		} catch (ArchiveExtractor.ExtractionCancelledException e) {
+			log.debug("Archive opening cancelled for {}", target);
+			closing = true;
+			emitArchiveClosed();
 		} catch (Exception e) {
 			// Plugin boundary: decode errors from broken archives surface as
 			// runtime exceptions, not only IOException — none may escape to the
@@ -249,7 +254,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	/** Mount or extract an archive file and return its root listing. */
-	private NuclrResourceData openArchive(Path target) throws IOException {
+	private NuclrResourceData openArchive(Path target, BooleanSupplier cancelled) throws IOException {
 
 		// Set these before any password prompt so cancellation can pop this newly
 		// created panel and restore/select the archive in its parent panel.
@@ -257,11 +262,13 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		this.archiveDisplayName = target.getFileName() != null ? target.getFileName().toString() : target.toString();
 
 		// If the archive lives inside another virtual filesystem, copy it out first.
-		Path realFile = materializeIfNeeded(target);
+		Path realFile = materializeIfNeeded(target, cancelled);
+		ArchiveExtractor.checkCancelled(cancelled);
 
 		final ArchiveType type = ArchiveType.of(realFile);
 
-		final Path root = type.usesNioZipFilesystem() ? openZipFamily(realFile) : extractArchive(realFile, type);
+		final Path root = type.usesNioZipFilesystem() ? openZipFamily(realFile, cancelled)
+				: extractArchive(realFile, type, cancelled);
 
 		if (root == null) {
 			closing = true;
@@ -281,45 +288,62 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	 * with a detected entry-name charset, and finally falls back to temp
 	 * extraction (handling encrypted archives via a password prompt).
 	 */
-	private Path openZipFamily(Path file) throws IOException {
+	private Path openZipFamily(Path file, BooleanSupplier cancelled) throws IOException {
 
-		if (ArchiveExtractor.isEncrypted(file)) {
-			return extractEncryptedZip(file);
+		ArchiveExtractor.checkCancelled(cancelled);
+		if (ArchiveExtractor.isEncrypted(file, cancelled)) {
+			return extractEncryptedZip(file, cancelled);
 		}
 
 		// Archives written with Windows-style backslash separators in entry names
 		// (against the ZIP spec) cannot be browsed via the NIO ZipFileSystem, which
 		// treats '\' as a literal character and so collapses nested paths into flat,
 		// unnavigable root entries. Extract instead to rebuild the real folder tree.
-		if (ArchiveExtractor.hasBackslashEntryNames(file)) {
+		if (ArchiveExtractor.hasBackslashEntryNames(file, cancelled)) {
 			log.info("ZIP {} uses backslash separators; extracting to rebuild the folder tree",
 					file.getFileName());
-			final Charset detected = ArchiveExtractor.detectZipEntryCharset(file);
-			return extractToTempDir(dir -> ArchiveExtractor.extractZipNormalizingSeparators(file, dir, detected));
+			final Charset detected = ArchiveExtractor.detectZipEntryCharset(file, cancelled);
+			return extractToTempDir(
+					dir -> ArchiveExtractor.extractZipNormalizingSeparators(file, dir, detected, cancelled));
 		}
 
 		try {
-			return mountZip(file, null);
+			return mountZip(file, null, cancelled);
+		} catch (ArchiveExtractor.ExtractionCancelledException e) {
+			throw e;
 		} catch (IOException first) {
 			log.info("Default ZIP mount failed for {} ({}); retrying with detected charset",
 					file.getFileName(), first.getMessage());
 		}
 
-		final Charset detected = ArchiveExtractor.detectZipEntryCharset(file);
+		final Charset detected = ArchiveExtractor.detectZipEntryCharset(file, cancelled);
 
 		try {
-			return mountZip(file, detected);
+			return mountZip(file, detected, cancelled);
+		} catch (ArchiveExtractor.ExtractionCancelledException e) {
+			throw e;
 		} catch (IOException second) {
 			log.info("Charset ZIP mount failed for {} ({}); extracting instead",
 					file.getFileName(), second.getMessage());
-			return extractToTempDir(dir -> ArchiveExtractor.extractZip(file, dir, null, detected));
+			return extractToTempDir(dir -> ArchiveExtractor.extractZip(file, dir, null, detected, cancelled));
 		}
 	}
 
-	private Path mountZip(Path file, Charset charset) throws IOException {
+	private Path mountZip(Path file, Charset charset, BooleanSupplier cancelled) throws IOException {
 		final Map<String, ?> env = charset == null ? Map.of() : Map.of("encoding", charset.name());
+		ArchiveExtractor.checkCancelled(cancelled);
 		try {
 			final FileSystem fs = FileSystems.newFileSystem(file, env);
+			try {
+				ArchiveExtractor.checkCancelled(cancelled);
+			} catch (ArchiveExtractor.ExtractionCancelledException e) {
+				try {
+					fs.close();
+				} catch (IOException cleanupFailure) {
+					e.addSuppressed(cleanupFailure);
+				}
+				throw e;
+			}
 			this.mountedFileSystem = fs;
 			return fs.getPath("/");
 		} catch (FileSystemAlreadyExistsException e) {
@@ -330,16 +354,17 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 	}
 
-	private Path extractEncryptedZip(Path file) throws IOException {
+	private Path extractEncryptedZip(Path file, BooleanSupplier cancelled) throws IOException {
 
-		final Charset charset = ArchiveExtractor.detectZipEntryCharset(file);
+		final Charset charset = ArchiveExtractor.detectZipEntryCharset(file, cancelled);
 
 		char[] password = promptPassword(file.getFileName().toString(), false);
 
 		while (password != null) {
+			ArchiveExtractor.checkCancelled(cancelled);
 			final char[] attempt = password;
 			try {
-				return extractToTempDir(dir -> ArchiveExtractor.extractZip(file, dir, attempt, charset));
+				return extractToTempDir(dir -> ArchiveExtractor.extractZip(file, dir, attempt, charset, cancelled));
 			} catch (ArchiveExtractor.WrongPasswordException wrong) {
 				password = promptPassword(file.getFileName().toString(), true);
 			}
@@ -349,12 +374,12 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		return null;
 	}
 
-	private Path extractArchive(Path file, ArchiveType type) throws IOException {
+	private Path extractArchive(Path file, ArchiveType type, BooleanSupplier cancelled) throws IOException {
 		return switch (type) {
-			case RAR -> extractToTempDir(dir -> ArchiveExtractor.extractRar(file, dir));
-			case TAR -> extractToTempDir(dir -> ArchiveExtractor.extractTar(file, dir, false));
-			case TAR_GZ -> extractToTempDir(dir -> ArchiveExtractor.extractTar(file, dir, true));
-			case GZIP -> extractToTempDir(dir -> ArchiveExtractor.extractGzip(file, dir));
+			case RAR -> extractToTempDir(dir -> ArchiveExtractor.extractRar(file, dir, cancelled));
+			case TAR -> extractToTempDir(dir -> ArchiveExtractor.extractTar(file, dir, false, cancelled));
+			case TAR_GZ -> extractToTempDir(dir -> ArchiveExtractor.extractTar(file, dir, true, cancelled));
+			case GZIP -> extractToTempDir(dir -> ArchiveExtractor.extractGzip(file, dir, cancelled));
 			default -> throw new IOException("Unsupported archive type: " + type);
 		};
 	}
@@ -384,7 +409,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	 * archive inside an already-mounted ZIP), copy it out to a real temp file so
 	 * the NIO/extraction providers can open it.
 	 */
-	private Path materializeIfNeeded(Path target) throws IOException {
+	private Path materializeIfNeeded(Path target, BooleanSupplier cancelled) throws IOException {
 
 		if (target.getFileSystem() == FileSystems.getDefault()) {
 			return target;
@@ -392,7 +417,26 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		final String name = target.getFileName() != null ? target.getFileName().toString() : "archive";
 		final Path temp = Files.createTempFile("nuclr-nested-" + UUID.randomUUID() + "-", "-" + name);
-		Files.copy(target, temp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+		try (var input = Files.newInputStream(target); var output = Files.newOutputStream(temp)) {
+			final byte[] buffer = new byte[8192];
+			ArchiveExtractor.checkCancelled(cancelled);
+			while (true) {
+				final int read = input.read(buffer);
+				ArchiveExtractor.checkCancelled(cancelled);
+				if (read < 0) {
+					break;
+				}
+				output.write(buffer, 0, read);
+			}
+		} catch (IOException | RuntimeException e) {
+			try {
+				Files.deleteIfExists(temp);
+			} catch (IOException cleanupFailure) {
+				e.addSuppressed(cleanupFailure);
+				log.warn("Failed to delete partial materialized archive {}: {}", temp, cleanupFailure.getMessage());
+			}
+			throw e;
+		}
 		materializedTempFiles.add(temp);
 
 		log.info("Materialized nested archive {} to {}", name, temp);
