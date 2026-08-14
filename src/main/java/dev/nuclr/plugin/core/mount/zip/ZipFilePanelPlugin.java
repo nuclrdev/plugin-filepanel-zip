@@ -61,6 +61,7 @@ import dev.nuclr.platform.plugin.NuclrMenuResource;
 import dev.nuclr.platform.plugin.NuclrPluginCallback;
 import dev.nuclr.platform.plugin.NuclrPluginContext;
 import dev.nuclr.platform.plugin.NuclrResource;
+import dev.nuclr.platform.plugin.QuickViewNuclrPlugin;
 import dev.nuclr.plugin.core.mount.zip.service.DeleteService;
 import dev.nuclr.plugin.core.mount.zip.service.MakeNewFolderService;
 import lombok.extern.slf4j.Slf4j;
@@ -87,14 +88,6 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	// -------------------------------------------------------------------------
 
 	public static final String PluginId = "dev.nuclr.plugin.core.mount.zip";
-	private static final String PluginName = "Archive Panel";
-	private static final String PluginVersion = loadVersion();
-	private static final String PluginDescription = "Browse ZIP, JAR, WAR, EAR, RAR, TAR and GZIP archives in the file panel.";
-	private static final String PluginAuthor = "Nuclr Development Team";
-	private static final String PluginLicense = "Apache-2.0";
-	private static final String PluginWebsite = "https://nuclr.dev";
-	private static final String PluginPageUrl = "https://nuclr.dev/plugins/core/filepanel-zip.html";
-	private static final String PluginDocUrl = PluginPageUrl;
 
 	static final List<String> ColumnNames = List.of("Name", "Size", "Date", "Time");
 
@@ -916,71 +909,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	// Metadata accessors
 	// =========================================================================
 
-	@Override
-	public String id() {
-		return PluginId;
-	}
 
-	@Override
-	public String name() {
-		return PluginName;
-	}
-
-	@Override
-	public String version() {
-		return PluginVersion;
-	}
-	private static String loadVersion() {
-		try (var stream = ZipFilePanelPlugin.class.getResourceAsStream("/plugin.properties")) {
-			if (stream == null) return "unknown";
-			var props = new java.util.Properties();
-			props.load(stream);
-			return props.getProperty("version", "unknown");
-		} catch (java.io.IOException e) {
-			return "unknown";
-		}
-	}
-
-	@Override
-	public String description() {
-		return PluginDescription;
-	}
-
-	@Override
-	public String author() {
-		return PluginAuthor;
-	}
-
-	@Override
-	public String license() {
-		return PluginLicense;
-	}
-
-	@Override
-	public String website() {
-		return PluginWebsite;
-	}
-
-	@Override
-	public String pageUrl() {
-		return PluginPageUrl;
-	}
-
-	@Override
-	public String docUrl() {
-		return PluginDocUrl;
-	}
-
-	@Override
-	public Developer developer() {
-		return Developer.Official;
-	}
-
-	@Override
-	public boolean singleton() {
-		// Each opened archive needs its own mount, so instances are not shared.
-		return false;
-	}
 
 	@Override
 	public String uuid() {
@@ -1081,7 +1010,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		if (ActionCopy.equals(actionType)) {
 			BaseNuclrPlugin destination = other == null || other.uuid().equals(uuid)
-					|| other.is(BaseNuclrPlugin.Type.QuickView) ? this : other;
+					|| other instanceof QuickViewNuclrPlugin ? this : other;
 			Map<String, Object> transferData = destination instanceof ZipFilePanelPlugin archiveDestination
 					? withDestinationSnapshot(data, archiveDestination)
 					: data;
@@ -1121,7 +1050,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 		if (ActionMove.equals(actionType)) {
 			boolean inPlace = other == null || other.uuid().equals(uuid)
-					|| other.is(BaseNuclrPlugin.Type.QuickView);
+					|| other instanceof QuickViewNuclrPlugin;
 			Map<String, Object> transferData = !inPlace && other instanceof ZipFilePanelPlugin archiveDestination
 					? withDestinationSnapshot(data, archiveDestination)
 					: data;
@@ -1212,7 +1141,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 
 		if (destination == null || destination.uuid().equals(uuid)
-				|| destination.is(BaseNuclrPlugin.Type.QuickView)) {
+				|| destination instanceof QuickViewNuclrPlugin) {
 			if (sources.size() != 1) {
 				showError("Rename/Move", "Select one archive entry to rename.");
 				return null;
@@ -1509,4 +1438,5 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			return path.toString();
 		}
 	}
+
 }
