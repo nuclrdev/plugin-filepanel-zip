@@ -13,8 +13,8 @@
 			"author": "Nuclr Development Team",
 			"license": "Apache-2.0",
 			"website": "https://nuclr.dev",
-			"pageUrl": "https://nuclr.dev/plugins/core/filepanel-zip.html",
-			"docUrl": "https://nuclr.dev/plugins/core/filepanel-zip.html",
+			"pageUrl": "https://github.com/nuclrdev/plugin-filepanel-zip",
+			"docUrl": "https://github.com/nuclrdev/plugin-filepanel-zip",
 			"developer": "Official",
 			"singleton": false
 		}
