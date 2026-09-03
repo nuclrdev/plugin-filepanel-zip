@@ -334,6 +334,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			// commander.
 			log.error("Failed to open archive resource {}: {}", target, e.getMessage(), e);
 			showError("Could not open archive", e.getMessage());
+			closing = true;
+			emitArchiveClosed();
 		}
 
 		return null;
@@ -973,7 +975,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		return completed && result[0] != null && result[0].length > 0 ? result[0] : null;
 	}
 
-	private void showError(String title, String message) {
+	void showError(String title, String message) {
 		var visibleDialog = new AtomicReference<JDialog>();
 		SwingDialogRunner.runAndWait("archive error dialog", () -> {
 			var pane = new JOptionPane(message, JOptionPane.ERROR_MESSAGE, JOptionPane.DEFAULT_OPTION);
