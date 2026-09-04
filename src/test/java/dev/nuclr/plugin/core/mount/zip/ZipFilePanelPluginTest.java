@@ -2,6 +2,8 @@ package dev.nuclr.plugin.core.mount.zip;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -32,10 +34,12 @@ class ZipFilePanelPluginTest {
 		var eventBus = new RecordingEventBus();
 		var context = new TestPluginContext(eventBus);
 		var shownError = new AtomicReference<String>();
+		var closedBeforeError = new AtomicBoolean();
 		var plugin = new ZipFilePanelPlugin() {
 			@Override
 			void showError(String title, String message) {
 				shownError.set(title);
+				closedBeforeError.set("plugin.unload".equals(eventBus.type.get()));
 			}
 		};
 		plugin.preinit(context);
@@ -47,6 +51,28 @@ class ZipFilePanelPluginTest {
 		assertEquals("plugin.unload", eventBus.type.get());
 		NuclrResource selection = (NuclrResource) eventBus.data.get().get("selectionResource");
 		assertEquals(brokenRar, selection.getPath());
+		// The error dialog is modal and blocks this thread until it is dismissed, so the
+		// panel must already be on its way back before the dialog goes up.
+		assertTrue(closedBeforeError.get(), "panel must be closed before the error dialog is shown");
+	}
+
+	@Test
+	void failedRarOpenClosesPanelEvenWhenTheErrorDialogFails() throws Exception {
+		Path brokenRar = Files.writeString(tempDir.resolve("broken.rar"), "not a rar archive");
+		var eventBus = new RecordingEventBus();
+		var context = new TestPluginContext(eventBus);
+		var plugin = new ZipFilePanelPlugin() {
+			@Override
+			void showError(String title, String message) {
+				throw new IllegalStateException("no display");
+			}
+		};
+		plugin.preinit(context);
+
+		assertThrows(IllegalStateException.class,
+				() -> plugin.openResource(ArchiveNuclrResource.build(context, brokenRar), new AtomicBoolean()));
+
+		assertEquals("plugin.unload", eventBus.type.get());
 	}
 
 	private record TestPluginContext(NuclrEventBus eventBus) implements NuclrPluginContext {

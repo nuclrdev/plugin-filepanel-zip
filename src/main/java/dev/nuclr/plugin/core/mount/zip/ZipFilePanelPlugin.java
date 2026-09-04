@@ -17,8 +17,10 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import java.awt.KeyboardFocusManager;
 import java.awt.SecondaryLoop;
 import java.awt.Toolkit;
+import java.awt.Window;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
@@ -333,9 +335,13 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			// runtime exceptions, not only IOException — none may escape to the
 			// commander.
 			log.error("Failed to open archive resource {}: {}", target, e.getMessage(), e);
-			showError("Could not open archive", e.getMessage());
+			// Pop this half-opened panel back to where the user came from *before* the
+			// error dialog, never after it: the dialog blocks this thread until it is
+			// dismissed, so ordering the restore behind it leaves the panel empty for as
+			// long as the dialog is up — and forever if it is never dismissed.
 			closing = true;
 			emitArchiveClosed();
+			showError("Could not open archive", e.getMessage());
 		}
 
 		return null;
@@ -956,7 +962,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			panel.add(passwordField, java.awt.BorderLayout.CENTER);
 
 			var pane = new JOptionPane(panel, JOptionPane.QUESTION_MESSAGE, JOptionPane.OK_CANCEL_OPTION);
-			JDialog dialog = pane.createDialog(null, "Encrypted Archive");
+			JDialog dialog = pane.createDialog(activeWindow(), "Encrypted Archive");
 			visibleDialog.set(dialog);
 			try {
 				dialog.setVisible(true);
@@ -979,7 +985,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		var visibleDialog = new AtomicReference<JDialog>();
 		SwingDialogRunner.runAndWait("archive error dialog", () -> {
 			var pane = new JOptionPane(message, JOptionPane.ERROR_MESSAGE, JOptionPane.DEFAULT_OPTION);
-			JDialog dialog = pane.createDialog(null, title);
+			JDialog dialog = pane.createDialog(activeWindow(), title);
 			visibleDialog.set(dialog);
 			try {
 				dialog.setVisible(true);
@@ -988,6 +994,15 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 				dialog.dispose();
 			}
 		}, () -> dispose(visibleDialog));
+	}
+
+	/**
+	 * The window a dialog should hang off. An owner-less {@link JOptionPane} dialog is
+	 * application-modal but owned by a hidden frame, so it can end up behind the main
+	 * window while still blocking it — the app then looks frozen with no way to dismiss it.
+	 */
+	private static Window activeWindow() {
+		return KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
 	}
 
 	private static void dispose(AtomicReference<JDialog> visibleDialog) {
