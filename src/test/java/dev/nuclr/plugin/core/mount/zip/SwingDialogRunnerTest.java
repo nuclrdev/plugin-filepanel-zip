@@ -37,6 +37,7 @@ class SwingDialogRunnerTest {
 		try {
 			assertTrue(awaitState(worker, Thread.State.WAITING));
 			worker.interrupt();
+			assertTrue(awaitInterruptObserved(worker));
 		} finally {
 			releaseEdt.countDown();
 		}
@@ -89,6 +90,22 @@ class SwingDialogRunnerTest {
 			Thread.sleep(1);
 		}
 		return thread.getState() == state;
+	}
+
+	/**
+	 * Waits until {@code thread} has consumed its pending interrupt and parked again. The runner
+	 * only marks a queued dialog cancelled from inside its {@code InterruptedException} handler, so
+	 * releasing the EDT any earlier lets the dialog task run before it sees the cancellation.
+	 */
+	private static boolean awaitInterruptObserved(Thread thread) throws InterruptedException {
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (System.nanoTime() < deadline) {
+			if (!thread.isInterrupted() && thread.getState() == Thread.State.WAITING) {
+				return true;
+			}
+			Thread.sleep(1);
+		}
+		return false;
 	}
 
 	private static void await(CountDownLatch latch) {
