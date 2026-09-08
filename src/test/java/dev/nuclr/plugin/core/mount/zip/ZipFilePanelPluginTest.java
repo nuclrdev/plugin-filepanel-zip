@@ -82,6 +82,11 @@ class ZipFilePanelPluginTest {
 		}
 
 		@Override
+		public dev.nuclr.platform.NuclrCredentialStore getCredentialStore() {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
 		public NuclrThemeScheme getTheme() {
 			return null;
 		}
