@@ -21,6 +21,23 @@
 		<jarsigner.keyalias>nuclr</jarsigner.keyalias>
 	</properties>
 
+	<!-- Keep commons-compress's transitive commons libraries on the versions Commander ships:
+	     the plugin classloader is parent-first, so the host's copies are the ones that run. -->
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>commons-io</groupId>
+				<artifactId>commons-io</artifactId>
+				<version>2.22.0</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.commons</groupId>
+				<artifactId>commons-lang3</artifactId>
+				<version>3.21.0</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
 	<dependencies>
 		<dependency>
 			<groupId>dev.nuclr</groupId>
@@ -37,7 +54,7 @@
 		<dependency>
 			<groupId>tools.jackson.core</groupId>
 			<artifactId>jackson-databind</artifactId>
-			<version>3.2.1</version>
+			<version>3.2.3</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
@@ -58,7 +75,7 @@
 		<dependency>
 			<groupId>org.slf4j</groupId>
 			<artifactId>slf4j-api</artifactId>
-			<version>2.0.17</version>
+			<version>2.0.18</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
