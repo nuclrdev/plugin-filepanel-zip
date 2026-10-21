@@ -11,6 +11,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
@@ -29,8 +31,6 @@ import lombok.extern.slf4j.Slf4j;
 /** Provider-neutral move and rename operations for writable archive views. */
 @Slf4j
 final class ArchiveMoveService {
-
-	private static final String DialogTitle = "Rename/Move";
 
 	private ArchiveMoveService() {
 	}
@@ -54,7 +54,7 @@ final class ArchiveMoveService {
 			if (callback != null) {
 				callback.onError(resource.getName(), e instanceof Exception ex ? ex : new IOException(e));
 			}
-			showError(e.getMessage() != null ? e.getMessage() : "Could not rename the archive entry.");
+			showError(e.getMessage() != null ? e.getMessage() : tr("rename.failed"));
 			return null;
 		}
 	}
@@ -62,12 +62,12 @@ final class ArchiveMoveService {
 	/** Rename without prompting; package-visible for focused filesystem tests. */
 	static Path rename(Path source, String newName, NuclrPluginCallback callback) throws IOException {
 		if (source == null || source.getParent() == null || source.getFileName() == null) {
-			throw new IOException("The archive entry cannot be renamed.");
+			throw new IOException(tr("rename.not.possible"));
 		}
 
 		String name = newName == null ? "" : newName.trim();
 		if (isInvalidSingleName(name)) {
-			throw new IOException("The new name must be a single non-empty file or folder name.");
+			throw new IOException(tr("rename.invalid.name"));
 		}
 
 		Path target = source.resolveSibling(name);
@@ -79,7 +79,7 @@ final class ArchiveMoveService {
 		}
 
 		if (callback != null) {
-			callback.onStart("Renaming " + source.getFileName());
+			callback.onStart(tr("rename.progress", String.valueOf(source.getFileName())));
 		}
 		Files.move(source, target);
 		if (callback != null) {
@@ -105,20 +105,20 @@ final class ArchiveMoveService {
 
 	private static void validateMoveSources(Path destination, List<Path> sources) throws IOException {
 		if (destination == null || !Files.isDirectory(destination) || sources == null || sources.isEmpty()) {
-			throw new IOException("The move source or destination is not available.");
+			throw new IOException(tr("move.unavailable"));
 		}
 		for (Path source : sources) {
 			if (source == null || !Files.exists(source) || source.getFileName() == null
 					|| (!Files.isDirectory(source) && !Files.isRegularFile(source))) {
-				throw new IOException("The move source is not a file or folder: " + source);
+				throw new IOException(tr("move.source.invalid", String.valueOf(source)));
 			}
 			Path target = destination.resolve(source.getFileName().toString());
 			try {
 				if (Files.exists(target) && Files.isSameFile(source, target)) {
-					throw new IOException("The source is already in the destination folder: " + source);
+					throw new IOException(tr("move.source.in.destination", String.valueOf(source)));
 				}
 			} catch (SecurityException e) {
-				throw new IOException("Could not validate the move source: " + source, e);
+				throw new IOException(tr("move.source.unverified", String.valueOf(source)), e);
 			}
 		}
 	}
@@ -148,10 +148,10 @@ final class ArchiveMoveService {
 		final Object[] result = new Object[1];
 		var visibleDialog = new AtomicReference<JDialog>();
 		boolean completed = SwingDialogRunner.runAndWait("rename dialog", () -> {
-			var pane = new JOptionPane("New name:", JOptionPane.PLAIN_MESSAGE, JOptionPane.OK_CANCEL_OPTION);
+			var pane = new JOptionPane(tr("rename.prompt"), JOptionPane.PLAIN_MESSAGE, JOptionPane.OK_CANCEL_OPTION);
 			pane.setWantsInput(true);
 			pane.setInitialSelectionValue(currentName);
-			JDialog dialog = pane.createDialog(null, DialogTitle);
+			JDialog dialog = pane.createDialog(null, tr("rename.title"));
 			visibleDialog.set(dialog);
 			try {
 				dialog.setVisible(true);
@@ -174,7 +174,7 @@ final class ArchiveMoveService {
 		var visibleDialog = new AtomicReference<JDialog>();
 		SwingDialogRunner.runAndWait("rename error dialog", () -> {
 			var pane = new JOptionPane(message, JOptionPane.ERROR_MESSAGE, JOptionPane.DEFAULT_OPTION);
-			JDialog dialog = pane.createDialog(null, DialogTitle);
+			JDialog dialog = pane.createDialog(null, tr("rename.title"));
 			visibleDialog.set(dialog);
 			try {
 				dialog.setVisible(true);

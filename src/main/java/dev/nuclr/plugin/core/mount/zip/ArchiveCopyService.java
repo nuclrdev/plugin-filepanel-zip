@@ -11,6 +11,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.io.IOException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -65,7 +67,7 @@ final class ArchiveCopyService {
 		long total = countEntries(sources);
 		long[] completed = { 0L };
 		if (callback != null) {
-			callback.onStart("Copying into archive");
+			callback.onStart(tr("copy.progress"));
 		}
 
 		for (Path source : sources) {
@@ -88,7 +90,7 @@ final class ArchiveCopyService {
 			if (Files.isDirectory(source)) {
 				if (sameFileSystem(source, target)
 						&& target.toAbsolutePath().normalize().startsWith(source.toAbsolutePath().normalize())) {
-					throw new IOException("Cannot copy a folder into itself: " + source);
+					throw new IOException(tr("copy.folder.into.itself", String.valueOf(source)));
 				}
 				copyDirectory(source, target, callback, completed, total);
 			} else if (Files.isRegularFile(source)) {

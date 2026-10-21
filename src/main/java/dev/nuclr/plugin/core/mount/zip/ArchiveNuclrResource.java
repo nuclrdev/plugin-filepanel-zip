@@ -17,6 +17,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -126,7 +128,7 @@ final class ArchiveNuclrResource {
 
 	private static void addColumnValues(NuclrPluginContext ctx, NuclrResource r) {
 		r.getMetadata().put("Name", r.getName());
-		r.getMetadata().put("Size", r.isFolder() ? "Folder" : FileUtils.byteCountToDisplaySize(r.getLength()));
+		r.getMetadata().put("Size", r.isFolder() ? tr("resource.size.folder") : FileUtils.byteCountToDisplaySize(r.getLength()));
 		r.getMetadata().put("Date", getDate(ctx.getLocale(), r.getLastModifiedDateTime()));
 		// Date and Time are the two halves of the same (modification) timestamp;
 		// access time would show the extraction moment for temp-extracted archives.

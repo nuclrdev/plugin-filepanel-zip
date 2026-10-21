@@ -17,6 +17,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -66,7 +68,7 @@ public final class ZipFileNuclrResource extends NuclrResource {
 		this.setLastAccessDateTime(getLastAccessDateTime(path));
 
 		this.getMetadata().put("Name", this.getName());
-		this.getMetadata().put("Size", isFolder() ? "Folder" : FileUtils.byteCountToDisplaySize(this.getLength()));
+		this.getMetadata().put("Size", isFolder() ? tr("resource.size.folder") : FileUtils.byteCountToDisplaySize(this.getLength()));
 		this.getMetadata().put("Date", getDate(ctx.getLocale(), this.getLastModifiedDateTime()));
 		// Date and Time are the two halves of the same (modification) timestamp;
 		// access time would show the extraction moment for temp-extracted archives.

@@ -17,6 +17,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
@@ -50,8 +52,6 @@ import dev.nuclr.platform.plugin.NuclrResource;
  */
 final class DeleteDialogs {
 
-	private static final String TITLE = "Delete";
-
 	private DeleteDialogs() {
 	}
 
@@ -62,9 +62,9 @@ final class DeleteDialogs {
 		String header;
 		if (single) {
 			boolean folder = !sources.isEmpty() && sources.get(0).isFolder();
-			header = folder ? "Do you wish to delete the folder?" : "Do you wish to delete the file?";
+			header = folder ? tr("delete.confirm.folder") : tr("delete.confirm.file");
 		} else {
-			header = "Do you wish to delete the objects?";
+			header = tr("delete.confirm.many");
 		}
 
 		StringBuilder sb = new StringBuilder(header).append('\n');
@@ -73,7 +73,7 @@ final class DeleteDialogs {
 		}
 
 		Component message = buildText(sb.toString().stripTrailing(), !single);
-		return choose(TITLE, message, "OK", "Cancel");
+		return choose(tr("delete.title"), message, tr("common.ok"), tr("common.cancel"));
 	}
 
 	private static String fullPath(NuclrResource r) {
@@ -86,9 +86,9 @@ final class DeleteDialogs {
 	/** @return true to Skip (continue with the next item), false to Abort the operation. */
 	static boolean error(String name, Exception e) {
 
-		String detail = e == null || e.getMessage() == null ? "Could not delete the object." : e.getMessage();
-		Component message = buildText("Failed to delete:\n" + name + "\n\n" + detail, false);
-		return choose(TITLE, message, "Skip", "Abort");
+		String detail = e == null || e.getMessage() == null ? tr("delete.error.unknown") : e.getMessage();
+		Component message = buildText(tr("delete.error.message", name, detail), false);
+		return choose(tr("delete.title"), message, tr("common.skip"), tr("delete.error.abort"));
 	}
 
 	private static Component buildText(String text, boolean scroll) {

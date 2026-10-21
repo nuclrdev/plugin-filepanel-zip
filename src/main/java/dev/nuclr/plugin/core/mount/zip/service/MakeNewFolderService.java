@@ -17,6 +17,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip.service;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -34,18 +36,17 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class MakeNewFolderService {
 
-	private static final String DialogTitle = "Make Folder";
 	
 	public static Path makeNewFolder(NuclrResource currentFolder, NuclrPluginCallback callback) {
 
 		if (currentFolder == null || currentFolder.getPath() == null) {
-			showError("No archive folder is open.");
+			showError(tr("folder.none.open"));
 			return null;
 		}
 
 		Path parent = currentFolder.getPath();
 		if (!Files.isDirectory(parent)) {
-			showError("The current archive item is not a folder.");
+			showError(tr("folder.not.a.folder"));
 			return null;
 		}
 
@@ -58,18 +59,18 @@ public class MakeNewFolderService {
 			return null;
 		}
 		if (isInvalidSingleFolderName(folderName)) {
-			showError("Folder name cannot contain path separators.");
+			showError(tr("folder.name.separators"));
 			return null;
 		}
 
 		try {
 			Path target = parent.resolve(folderName);
 			if (Files.exists(target)) {
-				showError("A file or folder with that name already exists.");
+				showError(tr("folder.exists"));
 				return null;
 			}
 			if (callback != null) {
-				callback.onStart("Creating folder " + folderName);
+				callback.onStart(tr("folder.progress", folderName));
 			}
 			Files.createDirectory(target);
 			if (callback != null) {
@@ -81,7 +82,7 @@ public class MakeNewFolderService {
 			if (callback != null) {
 				callback.onError(folderName, e instanceof Exception ex ? ex : new IOException(e));
 			}
-			showError(e.getMessage() != null ? e.getMessage() : "Could not create folder.");
+			showError(e.getMessage() != null ? e.getMessage() : tr("folder.failed"));
 			return null;
 		}
 	}
@@ -98,9 +99,9 @@ public class MakeNewFolderService {
 		final Object[] result = new Object[1];
 		var visibleDialog = new AtomicReference<JDialog>();
 		boolean completed = SwingDialogRunner.runAndWait("make-folder dialog", () -> {
-			var pane = new JOptionPane("Folder name:", JOptionPane.PLAIN_MESSAGE, JOptionPane.OK_CANCEL_OPTION);
+			var pane = new JOptionPane(tr("folder.name.prompt"), JOptionPane.PLAIN_MESSAGE, JOptionPane.OK_CANCEL_OPTION);
 			pane.setWantsInput(true);
-			JDialog dialog = pane.createDialog(null, DialogTitle);
+			JDialog dialog = pane.createDialog(null, tr("folder.make.title"));
 			visibleDialog.set(dialog);
 			try {
 				dialog.setVisible(true);
@@ -120,7 +121,7 @@ public class MakeNewFolderService {
 		var visibleDialog = new AtomicReference<JDialog>();
 		SwingDialogRunner.runAndWait("make-folder error dialog", () -> {
 			var pane = new JOptionPane(message, JOptionPane.ERROR_MESSAGE, JOptionPane.DEFAULT_OPTION);
-			JDialog dialog = pane.createDialog(null, DialogTitle);
+			JDialog dialog = pane.createDialog(null, tr("folder.make.title"));
 			visibleDialog.set(dialog);
 			try {
 				dialog.setVisible(true);

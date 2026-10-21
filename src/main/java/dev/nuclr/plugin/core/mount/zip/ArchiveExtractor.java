@@ -17,6 +17,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.io.FilterInputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
@@ -155,9 +157,9 @@ final class ArchiveExtractor {
 				throw extractionFailure;
 			}
 			if (e.getType() == ZipException.Type.WRONG_PASSWORD) {
-				throw new WrongPasswordException("Wrong password for " + source.getFileName());
+				throw new WrongPasswordException(tr("extract.wrong.password", String.valueOf(source.getFileName())));
 			}
-			throw new IOException("Failed to extract ZIP: " + source.getFileName(), e);
+			throw new IOException(tr("extract.zip.failed", String.valueOf(source.getFileName())), e);
 		}
 	}
 
@@ -329,7 +331,7 @@ final class ArchiveExtractor {
 			if (extractionFailure != null) {
 				throw extractionFailure;
 			}
-			throw new IOException("Failed to extract RAR: " + source.getFileName(), e);
+			throw new IOException(tr("extract.rar.failed", String.valueOf(source.getFileName())), e);
 		}
 	}
 
@@ -735,7 +737,7 @@ final class ArchiveExtractor {
 		final Path resolved = base.resolve(normalized).normalize();
 
 		if (!resolved.startsWith(base)) {
-			throw new IOException("Blocked path traversal in archive entry: " + entryName);
+			throw new IOException(tr("extract.path.traversal", entryName));
 		}
 
 		return resolved;

@@ -17,6 +17,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -82,17 +84,17 @@ final class ArchiveExtractionBudget {
 
 		entryName = name;
 		if (entries >= maxEntries) {
-			throw limitExceeded("entry count exceeds " + maxEntries);
+			throw limitExceeded(tr("extract.limit.entries", String.valueOf(maxEntries)));
 		}
 		entries++;
 		entryBytes = 0;
 
 		if (declaredSize >= 0) {
 			if (declaredSize > maxEntryBytes) {
-				throw limitExceeded("entry expands beyond " + maxEntryBytes + " bytes");
+				throw limitExceeded(tr("extract.limit.entry.bytes", String.valueOf(maxEntryBytes)));
 			}
 			if (declaredSize > maxTotalBytes - totalBytes) {
-				throw limitExceeded("total expanded data exceeds " + maxTotalBytes + " bytes");
+				throw limitExceeded(tr("extract.limit.total.bytes", String.valueOf(maxTotalBytes)));
 			}
 		}
 	}
@@ -119,18 +121,18 @@ final class ArchiveExtractionBudget {
 			return;
 		}
 		if (count > maxEntryBytes - entryBytes) {
-			throw limitExceeded("entry expands beyond " + maxEntryBytes + " bytes");
+			throw limitExceeded(tr("extract.limit.entry.bytes", String.valueOf(maxEntryBytes)));
 		}
 		if (count > maxTotalBytes - totalBytes) {
-			throw limitExceeded("total expanded data exceeds " + maxTotalBytes + " bytes");
+			throw limitExceeded(tr("extract.limit.total.bytes", String.valueOf(maxTotalBytes)));
 		}
 		entryBytes += count;
 		totalBytes += count;
 	}
 
 	private LimitExceededException limitExceeded(String reason) {
-		final String entry = entryName == null ? "" : " at entry '" + entryName + "'";
-		return new LimitExceededException("Archive extraction stopped" + entry + ": " + reason);
+		return new LimitExceededException(entryName == null ? tr("extract.stopped", reason)
+				: tr("extract.stopped.at.entry", entryName, reason));
 	}
 
 	private static long positiveLongProperty(String name, long defaultValue) {

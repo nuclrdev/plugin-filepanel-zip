@@ -17,6 +17,8 @@
 */
 package dev.nuclr.plugin.core.mount.zip;
 
+import static dev.nuclr.plugin.core.mount.zip.Messages.tr;
+
 import java.awt.KeyboardFocusManager;
 import java.awt.SecondaryLoop;
 import java.awt.Toolkit;
@@ -174,6 +176,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	@Override
 	public void preinit(NuclrPluginContext context) {
+		if (context != null) {
+			Messages.use(context.getLocale());
+		}
 		this.context = context;
 		log.info("Archive panel plugin loaded");
 	}
@@ -341,7 +346,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			// long as the dialog is up — and forever if it is never dismissed.
 			closing = true;
 			emitArchiveClosed();
-			showError("Could not open archive", e.getMessage());
+			showError(tr("error.open.archive"), e.getMessage());
 		}
 
 		return null;
@@ -619,7 +624,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		// (RAR/TAR/encrypted) are read-only, so deleting from them would only touch the
 		// throwaway extraction and never the original archive.
 		if (!isWritableArchive()) {
-			showError("Delete", "This archive view is read-only.");
+			showError(tr("delete.title"), tr("archive.read.only"));
 			return;
 		}
 
@@ -644,7 +649,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		}
 
 		if (!isWritableArchive()) {
-			showError("Make Folder", "This archive view is read-only.");
+			showError(tr("folder.make.title"), tr("archive.read.only"));
 			return;
 		}
 
@@ -694,26 +699,26 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	}
 
 	private static void addDefaultMenuItems(List<NuclrMenuResource> items, boolean isDirectory) {
-		items.add(menu("View", "F3", ActionView));
-		items.add(menu("Edit", "F4", ActionEdit));
-		items.add(menu("Copy", "F5", ActionCopy));
-		items.add(menu(isDirectory ? "Move" : "Rename/Move", "F6", ActionMove));
-		items.add(menu("Make Folder", "F7", ActionMakeFolder));
-		items.add(menu("Delete", "F8", ActionDelete));
-		items.add(menu("Quit", "F10", "quit"));
-		items.add(menu("Plugins", "F11", "plugins"));
-		items.add(menu("Screen", "F12", "screen"));
+		items.add(menu(tr("menu.view"), "F3", ActionView));
+		items.add(menu(tr("menu.edit"), "F4", ActionEdit));
+		items.add(menu(tr("menu.copy"), "F5", ActionCopy));
+		items.add(menu(isDirectory ? tr("menu.move") : tr("menu.rename.move"), "F6", ActionMove));
+		items.add(menu(tr("menu.make.folder"), "F7", ActionMakeFolder));
+		items.add(menu(tr("menu.delete"), "F8", ActionDelete));
+		items.add(menu(tr("menu.quit"), "F10", "quit"));
+		items.add(menu(tr("menu.plugins"), "F11", "plugins"));
+		items.add(menu(tr("menu.screen"), "F12", "screen"));
 	}
 
 	private static void addAltMenuItems(List<NuclrMenuResource> items) {
-		items.add(menu("Left Panel", "Alt+F1", "left"));
-		items.add(menu("Right Panel", "Alt+F2", "right"));
-		items.add(menu("Find", "Alt+F7", "find"));
-		items.add(menu("History", "Alt+F8", "history"));
-		items.add(menu("Fullscreen", "Alt+F9", "fullscreen"));
-		items.add(menu("Tree", "Alt+F10", "tree"));
-		items.add(menu("View History", "Alt+F11", "viewHistory"));
-		items.add(menu("Folder History", "Alt+F12", "folderHistory"));
+		items.add(menu(tr("menu.left.panel"), "Alt+F1", "left"));
+		items.add(menu(tr("menu.right.panel"), "Alt+F2", "right"));
+		items.add(menu(tr("menu.find"), "Alt+F7", "find"));
+		items.add(menu(tr("menu.history"), "Alt+F8", "history"));
+		items.add(menu(tr("menu.fullscreen"), "Alt+F9", "fullscreen"));
+		items.add(menu(tr("menu.tree"), "Alt+F10", "tree"));
+		items.add(menu(tr("menu.view.history"), "Alt+F11", "viewHistory"));
+		items.add(menu(tr("menu.folder.history"), "Alt+F12", "folderHistory"));
 	}
 
 	/**
@@ -725,23 +730,27 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	 * two report the moment of extraction rather than anything about the entry.
 	 */
 	private static void addCtrlMenuItems(List<NuclrMenuResource> items) {
-		items.add(menu("Hide Left", "Ctrl+F1", "hideLeft"));
-		items.add(menu("Hide Right", "Ctrl+F2", "hideRight"));
-		items.add(sortByColumn("Name", "Ctrl+F3", "name"));
-		items.add(menu("Extension", "Ctrl+F4", SortEventPrefix + "ext"));
-		items.add(sortByColumn("Date", "Ctrl+F5", "modified"));
-		items.add(sortByColumn("Size", "Ctrl+F6", "size"));
-		items.add(menu("Unsort", "Ctrl+F7", SortEventPrefix + "unsorted"));
-		items.add(menu("Sort", "Ctrl+F12", SortEventPrefix + "dialog"));
+		items.add(menu(tr("menu.hide.left"), "Ctrl+F1", "hideLeft"));
+		items.add(menu(tr("menu.hide.right"), "Ctrl+F2", "hideRight"));
+		items.add(sortByColumn("Name", tr("menu.sort.name"), "Ctrl+F3", "name"));
+		items.add(menu(tr("menu.sort.extension"), "Ctrl+F4", SortEventPrefix + "ext"));
+		items.add(sortByColumn("Date", tr("menu.sort.date"), "Ctrl+F5", "modified"));
+		items.add(sortByColumn("Size", tr("menu.sort.size"), "Ctrl+F6", "size"));
+		items.add(menu(tr("menu.unsort"), "Ctrl+F7", SortEventPrefix + "unsorted"));
+		items.add(menu(tr("menu.sort"), "Ctrl+F12", SortEventPrefix + "dialog"));
 	}
 
-	/** A sort bound to one of this panel's table columns, so the header arrow lands on it. */
-	private static NuclrMenuResource sortByColumn(String columnName, String functionKey, String criterion) {
-		return menu(columnName, functionKey, SortEventPrefix + criterion + ":" + columnName);
+	/**
+	 * A sort bound to one of this panel's table columns, so the header arrow lands on it. The event
+	 * names the column by its (English) key; only the label is translated.
+	 */
+	private static NuclrMenuResource sortByColumn(String columnName, String label, String functionKey,
+			String criterion) {
+		return menu(label, functionKey, SortEventPrefix + criterion + ":" + columnName);
 	}
 
 	private static void addShiftMenuItems(List<NuclrMenuResource> items) {
-		items.add(menu("Delete Permanently", "Shift+F8", ActionDeletePermanent));
+		items.add(menu(tr("menu.delete.permanently"), "Shift+F8", ActionDeletePermanent));
 	}
 
 	private static NuclrMenuResource menu(String name, String functionKey, String eventType) {
@@ -854,7 +863,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			final var resource = selectedResources.get(0);
 			final Path path = resource.getPath();
 			final boolean directory = path != null && Files.isDirectory(path);
-			final String type = directory ? "Folder" : humanReadableSize(resource.getLength());
+			final String type = directory ? tr("panel.summary.folder") : humanReadableSize(resource.getLength());
 			final String name = resource.getName() == null || resource.getName().isBlank() ? "?" : resource.getName();
 			return name + "  |  " + type;
 		}
@@ -871,7 +880,8 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 				totalBytes += resource.getLength();
 			}
 		}
-		return "Bytes: " + humanReadableSize(totalBytes) + ",  files: " + fileCount + ",  folders: " + folderCount;
+		return tr("panel.summary.selection", humanReadableSize(totalBytes), String.valueOf(fileCount),
+				String.valueOf(folderCount));
 	}
 
 	private static String humanReadableSize(long sizeBytes) {
@@ -957,12 +967,12 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		final Runnable prompt = () -> {
 			final var passwordField = new JPasswordField(20);
 			final var panel = new JPanel(new java.awt.BorderLayout(0, 8));
-			final String message = (retry ? "Wrong password. " : "") + "Enter password for \"" + archiveName + "\":";
+			final String message = retry ? tr("password.prompt.retry", archiveName) : tr("password.prompt", archiveName);
 			panel.add(new JLabel(message), java.awt.BorderLayout.NORTH);
 			panel.add(passwordField, java.awt.BorderLayout.CENTER);
 
 			var pane = new JOptionPane(panel, JOptionPane.QUESTION_MESSAGE, JOptionPane.OK_CANCEL_OPTION);
-			JDialog dialog = pane.createDialog(activeWindow(), "Encrypted Archive");
+			JDialog dialog = pane.createDialog(activeWindow(), tr("password.title"));
 			visibleDialog.set(dialog);
 			try {
 				dialog.setVisible(true);
@@ -1114,7 +1124,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (ActionClipboardPaste.equals(actionType)) {
 			List<Path> paths = ArchiveClipboardService.readPaths();
 			if (paths.isEmpty()) {
-				showError("Clipboard Paste", "The clipboard does not contain any local files.");
+				showError(tr("clipboard.paste.title"), tr("clipboard.paste.no.files"));
 				return;
 			}
 			Path destination = currentFolder != null ? currentFolder.getPath() : null;
@@ -1148,7 +1158,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 	private NuclrResource moveFromArchive(BaseNuclrPlugin destination, List<NuclrResource> selectedResources,
 			NuclrResource focusedResource, Map<String, Object> data, NuclrPluginCallback callback) {
 		if (!isWritableArchive()) {
-			showError("Move", "This archive view is read-only.");
+			showError(tr("move.title"), tr("archive.read.only"));
 			return null;
 		}
 
@@ -1160,7 +1170,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		if (destination == null || destination.uuid().equals(uuid)
 				|| destination instanceof QuickViewNuclrPlugin) {
 			if (sources.size() != 1) {
-				showError("Rename/Move", "Select one archive entry to rename.");
+				showError(tr("rename.title"), tr("rename.select.one"));
 				return null;
 			}
 			Path renamed = renameArchiveEntry(sources.get(0), callback);
@@ -1189,7 +1199,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	private void moveIntoArchive(Path destination, List<Path> sources, NuclrPluginCallback callback) {
 		if (!isWritableArchive()) {
-			showError("Move", "This archive view is read-only.");
+			showError(tr("move.title"), tr("archive.read.only"));
 			return;
 		}
 		if (sources == null || sources.isEmpty()) {
@@ -1202,9 +1212,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		} catch (IOException | RuntimeException e) {
 			log.error("Failed to move into archive {}: {}", archiveDisplayName, e.getMessage(), e);
 			if (callback != null) {
-				callback.onError("Could not move into archive", e instanceof Exception ex ? ex : new IOException(e));
+				callback.onError(tr("move.into.failed"), e instanceof Exception ex ? ex : new IOException(e));
 			}
-			showError("Move", e.getMessage());
+			showError(tr("move.title"), e.getMessage());
 		}
 	}
 
@@ -1213,7 +1223,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			return;
 		}
 		if (requiresWritableArchive && !isWritableArchive()) {
-			showError("Edit", "This archive view is read-only.");
+			showError(tr("edit.title"), tr("archive.read.only"));
 			return;
 		}
 		if (context != null && context.getEventBus() != null) {
@@ -1223,7 +1233,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 
 	private void copyIntoArchive(Path destination, List<Path> sources, NuclrPluginCallback callback) {
 		if (!isWritableArchive()) {
-			showError("Copy", "This archive view is read-only.");
+			showError(tr("copy.title"), tr("archive.read.only"));
 			return;
 		}
 		if (sources == null || sources.isEmpty()) {
@@ -1236,9 +1246,9 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 		} catch (IOException | RuntimeException e) {
 			log.error("Failed to copy into archive {}: {}", archiveDisplayName, e.getMessage(), e);
 			if (callback != null) {
-				callback.onError("Could not copy into archive", e instanceof Exception ex ? ex : new IOException(e));
+				callback.onError(tr("copy.into.failed"), e instanceof Exception ex ? ex : new IOException(e));
 			}
-			showError("Copy", e.getMessage());
+			showError(tr("copy.title"), e.getMessage());
 		}
 	}
 
@@ -1439,7 +1449,7 @@ public class ZipFilePanelPlugin implements FilePanelNuclrPlugin, NuclrEventListe
 			ArchiveClipboardService.copy(paths, displayPaths);
 		} catch (IOException | RuntimeException e) {
 			log.error("Failed to copy archive entries to clipboard: {}", e.getMessage(), e);
-			showError("Clipboard Copy", e.getMessage());
+			showError(tr("clipboard.copy.title"), e.getMessage());
 		}
 	}
 
